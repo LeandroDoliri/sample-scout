@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS samples (
     instrument TEXT,
     instrument_source TEXT,
     analyzed INTEGER NOT NULL DEFAULT 0,
-    error TEXT
+    error TEXT,
+    cover TEXT  -- ruta de la portada del pack (ver scanner.CoverFinder)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_root ON samples(root);
 CREATE INDEX IF NOT EXISTS idx_samples_instrument ON samples(instrument);
@@ -70,6 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_history_played ON history(played);
 """
 
 SCHEMA_VERSION = 2  # 1 (o 0, sin marcar) = solo `roots` y `samples`, la de 0.1.0
+# Columnas sumadas a `samples` después de crearla: (nombre, tipo)
+ADDED_COLUMNS = (("cover", "TEXT"),)
 EDITABLE_FIELDS = ("kind", "bpm", "key", "instrument")
 HISTORY_SIZE = 200
 
@@ -97,6 +100,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     """Lleva una base de cualquier versión anterior a la actual sin perder datos: las tablas
     nuevas se crean vacías y `roots` / `samples` quedan como estaban."""
     conn.executescript(SCHEMA)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(samples)")}
+    for name, kind in ADDED_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE samples ADD COLUMN {name} {kind}")
     if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
