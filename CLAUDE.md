@@ -63,7 +63,10 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
   (en WAV/AIFF solo formato + muestras, para que la metadata no cuente) se calculan en
   `_analyze_job` y `_index_file` los pone en NULL cuando cambia mtime/tamaño. `analyze_pending`
   también toma las filas analizadas con `peaks` NULL (bases viejas) y solo les calcula eso.
-  Si falla, `peaks` queda en `b""` para no reintentar. La ventana pide la onda en un
+  Si falla, `peaks` queda en `b""` para no reintentar. La columna Onda está en
+  `ALWAYS_VISIBLE` (no se oculta); `WaveDelegate` cachea el dibujo por ruta, picos y tamaño y,
+  para filas con `peaks` NULL, emite `wanted`: la ventana calcula solo las filas visibles
+  (`_next_row_waves`, las últimas pedidas primero). La ventana pide la onda en un
   `QThreadPool` si el análisis todavía no llegó (`db.set_peaks` no pisa una existente).
 - Modo Carpetas: `folders.build_tree` (sin Qt, testeado) arma el árbol desde
   `db.folder_counts` (GROUP BY `root, folder`, con el índice `idx_samples_folder`), nunca desde

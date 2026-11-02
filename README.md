@@ -65,8 +65,10 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
 8. **Forma de onda:** debajo de la portada se ve la onda del sample elegido, con el cursor de
    reproducción avanzando. Hacé clic sobre la onda para reproducir desde ese punto. Se calcula
    una vez (en el análisis, o en segundo plano al elegir un sample que todavía no la tiene) y
-   queda guardada en la base; se recalcula solo si el archivo cambia. También hay una mini onda
-   por fila: clic derecho en el encabezado → *Forma de onda (mini)* (arranca oculta).
+   queda guardada en la base; se recalcula solo si el archivo cambia. Además, **cada fila
+   muestra su onda** en la columna *Onda*, siempre visible en los dos modos (se puede mover
+   arrastrando el encabezado, pero no ocultar). Una fila que todavía no tiene onda muestra una
+   línea tenue y la app la calcula en segundo plano, solo para las filas que estás viendo.
 9. **Duplicados:** en el panel *Biblioteca*, la vista **Duplicados** junta los archivos con el
    mismo audio aunque estén en otras carpetas o con otro nombre. Cada grupo va junto y con un
    fondo que alterna. En el panel de la derecha, un sample duplicado lista sus otras copias:

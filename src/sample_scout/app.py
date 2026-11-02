@@ -14,7 +14,7 @@ import traceback
 from collections import OrderedDict
 
 from PySide6.QtCore import (QAbstractItemModel, QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
-                            QModelIndex, QObject, QRegularExpression, QRunnable, QSettings, QSize,
+                            QModelIndex, QObject, QRect, QRegularExpression, QRunnable, QSettings, QSize,
                             Qt, QThread, QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
                            QIcon, QImage, QImageReader, QKeySequence, QPainter, QPixmap,
@@ -43,21 +43,26 @@ COLUMNS = [
     ("bpm", "BPM"), ("key", "Key"), ("rating", "Estrellas"), ("duration", "Duración"),
     ("wave", "Onda"), ("tags", "Tags"), ("folder", "Carpeta"),
 ]
-COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 90, 140, 200)
+COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 150, 140, 200)
 FAVORITE_COLUMN = 0
 NAME_COLUMN = 1
 RATING_COLUMN = 6
 NUMERIC_FIELDS = ("favorite", "bpm", "rating", "duration")
 UNSORTABLE_FIELDS = ("wave",)
-DEFAULT_HIDDEN = ("wave",)  # columnas opcionales: arrancan ocultas
+# Siempre a la vista, como en Loopcloud: no se pueden ocultar, solo mover. Una configuración
+# guardada que las tenía ocultas las vuelve a mostrar.
+ALWAYS_VISIBLE = ("wave",)
+ROW_HEIGHT = 26  # deja ~20 px de alto para la onda sin agrandar mucho la tabla
 KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
 # En el menú de columnas, "★" u "Onda" solos no se entienden.
-COLUMN_MENU_LABELS = {"favorite": "Favorito", "wave": "Forma de onda (mini)"}
+COLUMN_MENU_LABELS = {"favorite": "Favorito", "wave": "Forma de onda (siempre visible)"}
 STAR_COLOR = QColor("#d4a017")
 WAVE_COLOR = QColor("#9ca3af")
 WAVE_PLAYED_COLOR = QColor("#0f766e")
+WAVE_SELECTED_COLOR = QColor("#f3f4f6")  # onda de la fila elegida, sobre el azul de selección
 GROUP_SHADE = QColor(15, 118, 110, 22)  # fondo de un grupo sí y otro no en "Duplicados"
 PEAKS_ROLE = Qt.UserRole + 1
+PATH_ROLE = Qt.UserRole + 2
 # "Sonidos parecidos" y búsqueda por sonido: cuántos se muestran (los mejores que pasan
 # los filtros)
 SIMILAR_RESULTS = 100
@@ -136,13 +141,51 @@ class WaveformView(QWidget):
 
 
 class WaveDelegate(QStyledItemDelegate):
-    """Mini forma de onda de la columna opcional "Onda"."""
+    """Forma de onda de cada fila (columna "Onda"). Dibujarla línea por línea en Python es
+    lento para hacerlo en cada repintado, así que guarda el dibujo por ruta y tamaño. Una fila
+    que todavía no tiene onda muestra una línea tenue y la pide con `wanted(ruta)`: solo se
+    pintan las filas visibles, así que solo se piden esas."""
+
+    MAX_CACHED = 3000
+    wanted = Signal(str)
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._cache: OrderedDict[tuple, QPixmap] = OrderedDict()
 
     def paint(self, painter, option, index) -> None:
         super().paint(painter, option, index)  # fondo y selección
         peaks = index.data(PEAKS_ROLE)
-        if peaks:
-            paint_peaks(painter, option.rect.adjusted(3, 3, -3, -3), peaks, WAVE_COLOR)
+        rect = option.rect.adjusted(3, 3, -3, -3)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        if peaks is None:
+            painter.save()
+            painter.setPen(QColor("#e5e7eb"))
+            middle = rect.center().y()
+            painter.drawLine(rect.left(), middle, rect.right(), middle)
+            painter.restore()
+            self.wanted.emit(index.data(PATH_ROLE))
+            return
+        if not peaks:
+            return  # b"": no se pudo leer el audio
+        ratio = painter.device().devicePixelRatioF()
+        color = (WAVE_SELECTED_COLOR if option.state & QStyle.State_Selected else WAVE_COLOR)
+        key = (index.data(PATH_ROLE), peaks, rect.width(), rect.height(), ratio, color.rgba())
+        pixmap = self._cache.get(key)
+        if pixmap is None:
+            pixmap = QPixmap(round(rect.width() * ratio), round(rect.height() * ratio))
+            pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(Qt.transparent)
+            cache_painter = QPainter(pixmap)
+            paint_peaks(cache_painter, QRect(0, 0, rect.width(), rect.height()), peaks, color)
+            cache_painter.end()
+            self._cache[key] = pixmap
+            while len(self._cache) > self.MAX_CACHED:
+                self._cache.popitem(last=False)
+        else:
+            self._cache.move_to_end(key)
+        painter.drawPixmap(rect.topLeft(), pixmap)
 
 
 class _WaveJob(QRunnable):
@@ -308,13 +351,15 @@ class SampleModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         row = self.rows[index.row()]
         field = COLUMNS[index.column()][0]
+        if role == PATH_ROLE:
+            return row["path"]
+        if role == Qt.BackgroundRole and index.row() in self._shaded:
+            return GROUP_SHADE
+        if field == "wave":  # la dibuja WaveDelegate
+            return row["peaks"] if role == PEAKS_ROLE else None
         value = row[field]
         if role == Qt.DecorationRole and field == "name":
             return self._thumbnail(row)
-        if role == Qt.BackgroundRole and index.row() in self._shaded:
-            return GROUP_SHADE
-        if field == "wave":
-            return row["peaks"] if role == PEAKS_ROLE else None
         if field in ("favorite", "rating"):
             if role == Qt.DisplayRole:
                 if field == "favorite":
@@ -707,8 +752,11 @@ class MainWindow(QMainWindow):
         self.covers = CoverCache()
         self.covers.loaded.connect(self._on_cover_loaded)
         self.wave_pool = QThreadPool(self)
-        self.wave_pool.setMaxThreadCount(1)
+        self.wave_pool.setMaxThreadCount(2)
         self._wave_pending: set[str] = set()
+        self._wave_wanted: OrderedDict[str, None] = OrderedDict()  # filas visibles sin onda
+        self.wave_timer = QTimer(self, singleShot=True, interval=0)  # junta los pedidos
+        self.wave_timer.timeout.connect(self._next_row_waves)
         self._wave_done.connect(self._on_wave_done)
 
         # Funciones de IA (clap.py): apagadas si el modelo no está o el usuario las desactivó.
@@ -811,10 +859,11 @@ class MainWindow(QMainWindow):
         self.table.setDragDropMode(QAbstractItemView.DragOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
         self.table.setIconSize(QSize(CoverCache.THUMB, CoverCache.THUMB))
-        self.table.setItemDelegateForColumn(COLUMNS.index(("wave", "Onda")),
-                                            WaveDelegate(self.table))
+        self.wave_delegate = WaveDelegate(self.table)
+        self.wave_delegate.wanted.connect(self._want_row_wave)
+        self.table.setItemDelegateForColumn(COLUMNS.index(("wave", "Onda")), self.wave_delegate)
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
@@ -1242,6 +1291,29 @@ class MainWindow(QMainWindow):
             self._wave_pending.add(path)
             self.wave_pool.start(_WaveJob(path, self._wave_done))
 
+    def _want_row_wave(self, path: str) -> None:
+        """Una fila visible sin onda: se anota y se calcula cuando haya un hilo libre. Al
+        scrollear rápido se piden muchas; se calculan primero las últimas y se descartan las
+        que ya no están a la vista."""
+        if path not in self._wave_pending:
+            self._wave_wanted[path] = None
+            self._wave_wanted.move_to_end(path)
+            self.wave_timer.start()
+
+    def _row_visible(self, path: str) -> bool:
+        row = self.model.row_of(path)
+        if row is None:
+            return False
+        top = self.table.rowAt(0)
+        bottom = self.table.rowAt(self.table.viewport().height() - 1)
+        return top <= row <= (bottom if bottom >= 0 else self.model.rowCount() - 1)
+
+    def _next_row_waves(self) -> None:
+        while self._wave_wanted and len(self._wave_pending) < self.wave_pool.maxThreadCount():
+            path, _ = self._wave_wanted.popitem(last=True)
+            if self._row_visible(path):
+                self._request_wave(path)
+
     def _on_wave_done(self, path: str, peaks: bytes) -> None:
         self._wave_pending.discard(path)
         db.set_peaks(self.conn, path, peaks)
@@ -1249,6 +1321,7 @@ class MainWindow(QMainWindow):
         row = self._current_row()
         if row and row["path"] == path:
             self._update_detail()
+        self._next_row_waves()
 
     def _playing_current(self) -> bool:
         """Si el reproductor tiene cargado el sample actual de la lista."""
@@ -2116,7 +2189,8 @@ class MainWindow(QMainWindow):
             action = menu.addAction(COLUMN_MENU_LABELS.get(field, label))
             action.setCheckable(True)
             action.setChecked(i in visible)
-            action.setEnabled(visible != [i])  # al menos una columna a la vista
+            # Al menos una columna a la vista; las de ALWAYS_VISIBLE no se ocultan.
+            action.setEnabled(visible != [i] and field not in ALWAYS_VISIBLE)
             action.toggled.connect(lambda on, i=i: self._set_column_visible(i, on))
         menu.addSeparator()
         menu.addAction("Restablecer columnas", self.reset_columns)
@@ -2134,14 +2208,13 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         for i in range(len(COLUMNS)):
             header.moveSection(header.visualIndex(i), i)
-            header.setSectionHidden(i, COLUMNS[i][0] in DEFAULT_HIDDEN)
+            header.setSectionHidden(i, False)
             header.resizeSection(i, COLUMN_WIDTHS[i])
         self._settings().remove("columns")
 
     def _save_columns(self) -> None:
         """Guarda por nombre de campo (no con header.saveState()): si una versión nueva suma
-        columnas, el estado viejo sigue sirviendo y las nuevas aparecen a la vista (salvo las de
-        DEFAULT_HIDDEN, que son opcionales)."""
+        columnas, el estado viejo sigue sirviendo y las nuevas aparecen a la vista."""
         header = self.table.horizontalHeader()
         state = {field: {"pos": header.visualIndex(i), "hidden": header.isSectionHidden(i),
                          "width": header.sectionSize(i) or COLUMN_WIDTHS[i]}
@@ -2166,8 +2239,13 @@ class MainWindow(QMainWindow):
             i = fields.index(field)
             header.moveSection(header.visualIndex(i), pos)
             saved = state.get(field, {})
-            header.setSectionHidden(i, bool(saved.get("hidden", field in DEFAULT_HIDDEN)))
+            # Antes la onda arrancaba oculta y angosta: si quedó así guardada, vuelve a la vista
+            # con el ancho de fábrica.
+            always = field in ALWAYS_VISIBLE
+            header.setSectionHidden(i, not always and bool(saved.get("hidden", False)))
             width = saved.get("width")
+            if always and saved.get("hidden"):
+                width = COLUMN_WIDTHS[i]
             if isinstance(width, int) and width >= 20:
                 header.resizeSection(i, width)
         if all(header.isSectionHidden(i) for i in range(len(fields))):
