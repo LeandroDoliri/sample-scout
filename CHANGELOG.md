@@ -8,6 +8,8 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 
 ## [Sin publicar]
 
+## [0.4.0] - 2026-11-02
+
 ### Agregado
 - Modo **Carpetas**, al lado del de siempre (**Librería**): un árbol con cada carpeta agregada
   y sus subcarpetas tal como están en el disco, con la cantidad de samples de cada una y la
@@ -22,8 +24,8 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
   plano, solo las que están a la vista.
 
 ### Cambiado
-- La base pasa al esquema 5 (índice por carpeta, para armar el árbol y filtrar rápido); las
-  bases anteriores se actualizan solas.
+- La librería se actualiza sola al abrir la versión nueva (suma un índice por carpeta para
+  armar el árbol y filtrar rápido), sin perder nada ni volver a analizar.
 
 ## [0.3.0] - 2026-11-02
 
