@@ -45,7 +45,15 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
   `_apply` completa solo los campos vacíos con fuente `audio`. Reglas: one-shot → se descarta
   el BPM que venga de `name`; batería → se descarta la key de `audio`. Cada campo guarda su
   fuente en `<campo>_source`.
-- `db.py`: una conexión por hilo, WAL. `SAMPLE_SCOUT_DB` cambia la base.
+- `db.py`: una conexión por hilo, WAL. `SAMPLE_SCOUT_DB` cambia la base. `migrate` lleva
+  cualquier base vieja al `SCHEMA_VERSION` actual (`PRAGMA user_version`) sin perder datos.
+  Los datos del usuario (`marks`, `user_fields`, `tags`, `collections`, `collection_items`,
+  `history`) van en tablas aparte con clave por **ruta**, no por `samples.id`: `samples` se
+  borra y se regenera al quitar carpetas o re-indexar, y estos datos tienen que sobrevivir.
+- Fuente `user`: `set_user_field` escribe `user_fields` y la fila de `samples`; `_index_file`
+  vuelve a aplicar `user_fields` después de cada upsert y `_apply` saltea los campos `user`
+  (relee la fila actual, porque el usuario pudo editar durante el análisis). Un valor `user`
+  en NULL significa "vacío a propósito": no se re-estima.
 - `app.py`: `LibraryWorker` (escaneo + análisis) y `TaskWorker` (tareas cortas, como chequear o
   aplicar la actualización) corren en QThreads; nunca tocar widgets desde ellos, solo emitir
   señales. El arrastre sale de `SampleModel.mimeData` (URLs de archivo: Ableton las recibe como

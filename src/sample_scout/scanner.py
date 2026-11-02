@@ -1,7 +1,11 @@
 """Escaneo de carpetas y análisis en paralelo.
 
 Prioridad de fuentes para cada dato:
-  metadata embebida (`meta`) > nombre/carpeta (`name`) > análisis de audio (`audio`)
+  corrección manual (`user`) > metadata embebida (`meta`) > nombre/carpeta (`name`)
+  > análisis de audio (`audio`)
+
+Lo que corrigió el usuario vive en `user_fields` (ver db.py) y se vuelve a aplicar cada vez que
+un archivo se indexa, así que ni re-escanear ni re-analizar lo pisan.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+from sample_scout import db
 from sample_scout.metadata import read_acid
 from sample_scout.parser import DRUM_INSTRUMENTS, parse_path
 
@@ -89,6 +94,7 @@ def _index_file(conn: sqlite3.Connection, root: str, path: str, st: os.stat_resu
             _src(parsed.instrument, "name"),
         ),
     )
+    db.apply_user_fields(conn, path)
 
 
 def _analyze_job(sample: dict) -> dict:
@@ -96,12 +102,16 @@ def _analyze_job(sample: dict) -> dict:
     from sample_scout.analyzer import analyze
 
     instrument = sample["instrument"]
+
+    def need(field: str) -> bool:  # un dato vacío a propósito por el usuario no se estima
+        return sample[field] is None and sample[f"{field}_source"] != "user"
+
     try:
         result = analyze(
             sample["path"],
-            need_bpm=sample["bpm"] is None,
-            need_key=sample["key"] is None and instrument not in DRUM_INSTRUMENTS,
-            need_instrument=instrument is None,
+            need_bpm=need("bpm"),
+            need_key=need("key") and instrument not in DRUM_INSTRUMENTS,
+            need_instrument=need("instrument"),
             kind_hint=sample["kind"],
         )
         return {"id": sample["id"], "result": result}
@@ -115,8 +125,12 @@ def _apply(conn: sqlite3.Connection, sample: dict, job: dict) -> None:
                      (job["error"], sample["id"]))
         return
     r = job["result"]
-    s = dict(sample)
+    # La fila actual y no la del arranque del análisis: el usuario pudo editarla mientras tanto.
+    current = conn.execute("SELECT * FROM samples WHERE id = ?", (sample["id"],)).fetchone()
+    s = dict(current) if current else dict(sample)
     for field in ("kind", "bpm", "key", "instrument"):
+        if s[f"{field}_source"] == "user":
+            continue
         if s[field] is None and r.get(field) is not None:
             s[field], s[f"{field}_source"] = r[field], "audio"
     # Un one-shot no tiene tempo; un número en el nombre era solo una numeración.

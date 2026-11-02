@@ -47,10 +47,36 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
 4. **Arrastrá** una o varias filas (`Ctrl`/`Shift` para elegir varias) a Ableton, al Explorador
    o a cualquier programa que acepte archivos. Se arrastra el archivo original.
 5. **Ordená** haciendo clic en el encabezado de cualquier columna.
-6. **Clic derecho** sobre una fila: mostrarla en el Explorador o copiar su ruta.
+6. **Clic derecho** sobre una o varias filas: favorito, estrellas, colecciones, editar datos y
+   tags, mostrar en el Explorador o copiar la ruta.
 
-Para saber de dónde salió un dato, pasá el mouse sobre la fila. El tooltip muestra la ruta y la
-fuente de cada dato (`meta`, `name` o `audio`, explicadas abajo).
+### Organizar a mano
+
+Además de lo automático, podés ordenar la librería a tu gusto. Todo funciona con una o varias
+filas elegidas.
+
+| Qué | Cómo |
+|---|---|
+| **Favorito** | `F`, clic en la ☆ de la primera columna o clic derecho. Si ya lo eran todos, los desmarca. |
+| **Estrellas** (0 a 5) | Teclas `1`…`5` (`0` las borra), clic sobre la columna Estrellas o clic derecho. |
+| **Colecciones** | **Nueva colección…** (panel izquierdo) o clic derecho → *Agregar a colección*. También podés arrastrar filas sobre una colección del panel. Un sample puede estar en varias. Clic derecho sobre una colección para renombrarla o borrarla; dentro de una colección, `Supr` saca los elegidos. |
+| **Historial** | En el panel *Biblioteca*: los últimos 200 samples que escuchaste, del más reciente al más viejo. Clic derecho para vaciarlo. |
+| **Editar datos y tags** | `F2` o clic derecho → *Editar datos y tags…*: tipo, instrumento, BPM y key, más tags libres para agregar o quitar. Con varias filas, cada campo muestra "(varios)" si no coinciden y solo se cambia lo que toques. Dejá el BPM vacío o elegí `—` para dejar un dato vacío. |
+
+**Filtros:** *Biblioteca* (toda la librería, historial o una colección), *Estrellas* (mínimo),
+*Tag* y *Solo favoritos* se suman a los demás filtros. La búsqueda de texto también encuentra
+los tags.
+
+Lo que corregís a mano queda con fuente `user`: gana sobre cualquier otra fuente y ni
+re-escanear ni re-analizar lo pisa. Para volver a lo automático, clic derecho → *Restablecer
+datos automáticos* (se recalcula con el próximo escaneo).
+
+Favoritos, estrellas, tags, colecciones, historial y correcciones se guardan por ruta de
+archivo: sobreviven a re-escanear y a quitar y volver a agregar la carpeta. Si movés o
+renombrás un archivo en el disco, para la app es otro sample y esos datos no lo siguen.
+
+Para saber de dónde salió un dato, pasá el mouse sobre la fila. El tooltip muestra la ruta, la
+fuente de cada dato (`user`, `meta`, `name` o `audio`, explicadas abajo) y los tags.
 
 **Re-escanear** vuelve a recorrer las carpetas: suma lo nuevo, re-analiza lo modificado y
 quita lo borrado. También pasa solo cada vez que abrís la app. **Quitar carpeta** (elegila
@@ -63,6 +89,7 @@ Cada dato se completa con la fuente más confiable disponible, en este orden:
 
 | Fuente | De dónde sale | Qué aporta | Confiabilidad |
 |---|---|---|---|
+| `user` | Lo que corregiste a mano (*Editar datos y tags…*) | Tipo, BPM, key, instrumento | Manda siempre |
 | `meta` | Chunk `acid` del WAV (lo escriben Ableton, Acid y muchos packs) | BPM, one-shot | Alta |
 | `name` | Nombre del archivo y carpetas | BPM, key, instrumento, loop / one-shot | Alta en packs comerciales |
 | `audio` | Análisis de la señal con librosa | Duración, tipo, BPM, key, instrumento de one-shots | Media |
@@ -109,7 +136,9 @@ Nunca se actualiza sin preguntar. Sin internet, no muestra nada.
 
 - Los samples **nunca se mueven, renombran ni modifican**: la app solo los lee.
 - La librería (índice y análisis) está en `%APPDATA%\SampleScout\library.db`. Si la borrás, la
-  app arranca de cero y re-analiza todo.
+  app arranca de cero y re-analiza todo, y se pierden favoritos, estrellas, tags, colecciones,
+  historial y correcciones, que viven en la misma base. Las bases de versiones anteriores se
+  actualizan solas al abrir la app, sin perder nada.
 - Con la app abierta sin consola, los errores se guardan en `%APPDATA%\SampleScout\app.log`.
 - La única conexión a internet es la consulta de versiones a la API pública de GitHub.
 
@@ -160,13 +189,13 @@ src/sample_scout/
   __init__.py     versión (lee VERSION) y APP_DIR (carpeta de la instalación o raíz del repo)
   __main__.py     python -m sample_scout
   app.py          ventana PySide6: filtros, tabla, preescucha, arrastre y aviso de actualización
-  db.py           esquema SQLite y consultas
+  db.py           esquema SQLite, migraciones, consultas y datos del usuario (por ruta)
   scanner.py      escaneo incremental de carpetas y análisis en paralelo (ProcessPoolExecutor)
   parser.py       datos desde el nombre del archivo y las carpetas
   metadata.py     chunk acid de los WAV
   analyzer.py     análisis de audio con librosa
   updater.py      actualización desde los releases de GitHub
-tests/            tests de parser.py y analyzer.py (pytest)
+tests/            tests de parser.py, analyzer.py y de los datos del usuario (pytest)
 tools/
   build_installer.ps1   arma el Python embebido, el instalador y el zip de actualización
   install_local.ps1     instala sin el Setup (PCs con Control inteligente de aplicaciones)
@@ -180,7 +209,9 @@ VERSION, RUNTIME, requirements.txt, CHANGELOG.md
 
 ### Probar
 
-- **Lógica pura:** `pytest` cubre el parser de nombres y la estimación de BPM y tipo.
+- **Lógica pura:** `pytest` cubre el parser de nombres, la estimación de BPM y tipo, la
+  migración de la base, la precedencia de la fuente `user` y que los datos del usuario
+  sobrevivan a re-escanear.
 - **Análisis de audio:**
   `.venv/Scripts/python tools/make_test_samples.py C:\temp\ss-lib --analyze` genera samples
   sintéticos e imprime lo que detectó. El docstring del script tiene la tabla esperada.
