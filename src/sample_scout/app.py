@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sqlite3
 import subprocess
 import sys
 import traceback
 
-from PySide6.QtCore import (QAbstractTableModel, QMimeData, QModelIndex, QObject, Qt, QThread,
-                            QTimer, QUrl, Signal)
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QIcon, QKeySequence
+from PySide6.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
+                            QModelIndex, QObject, QRegularExpression, Qt, QThread, QTimer, QUrl,
+                            Signal)
+from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
+                           QIcon, QKeySequence, QRegularExpressionValidator)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QSpinBox, QSplitter, QTableView,
-                               QToolBar, QVBoxLayout, QWidget)
+                               QCompleter, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+                               QPushButton, QSpinBox, QSplitter, QTableView, QToolBar,
+                               QVBoxLayout, QWidget)
 
 from sample_scout import APP_DIR, __version__, db, scanner, updater
 from sample_scout.analyzer import NOTES
@@ -27,24 +31,53 @@ from sample_scout.parser import INSTRUMENT_LABELS
 APP_USER_MODEL_ID = "LeandroDoliri.SampleScout"
 
 COLUMNS = [
-    ("name", "Nombre"), ("instrument", "Instrumento"), ("kind", "Tipo"), ("bpm", "BPM"),
-    ("key", "Key"), ("duration", "Duración"), ("folder", "Carpeta"),
+    ("favorite", "★"), ("name", "Nombre"), ("instrument", "Instrumento"), ("kind", "Tipo"),
+    ("bpm", "BPM"), ("key", "Key"), ("rating", "Estrellas"), ("duration", "Duración"),
+    ("tags", "Tags"), ("folder", "Carpeta"),
 ]
+COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 140)
+FAVORITE_COLUMN = 0
+RATING_COLUMN = 6
+NUMERIC_FIELDS = ("favorite", "bpm", "rating", "duration")
 KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
+STAR_COLOR = QColor("#d4a017")
+
+
+def stars(rating: int) -> str:
+    return "★" * rating + "☆" * (5 - rating)
 
 
 class SampleModel(QAbstractTableModel):
-    """Tabla de samples: cada fila es un dict de la tabla `samples`. Ordena en memoria (los
-    vacíos siempre al final) y entrega rutas de archivo al arrastrar."""
+    """Tabla de samples: cada fila es un dict de `db.search`. Ordena en memoria (los vacíos
+    siempre al final, y conserva el orden elegido al recargar) y entrega rutas de archivo al
+    arrastrar."""
 
     def __init__(self) -> None:
         super().__init__()
         self.rows: list[dict] = []
+        self.sort_by: tuple[int, Qt.SortOrder] | None = None  # None = orden de la consulta
+        self._row_of: dict[str, int] = {}
 
     def set_rows(self, rows: list[dict]) -> None:
         self.beginResetModel()
-        self.rows = rows
+        self.rows = self._sorted(rows)
+        self._reindex()
         self.endResetModel()
+
+    def update_rows(self, rows_by_path: dict[str, dict]) -> None:
+        """Reemplaza filas ya mostradas (después de marcar favoritos o estrellas) sin recargar
+        ni reordenar la tabla."""
+        for path, row in rows_by_path.items():
+            i = self._row_of.get(path)
+            if i is not None:
+                self.rows[i] = row
+                self.dataChanged.emit(self.index(i, 0), self.index(i, len(COLUMNS) - 1))
+
+    def row_of(self, path: str) -> int | None:
+        return self._row_of.get(path)
+
+    def _reindex(self) -> None:
+        self._row_of = {r["path"]: i for i, r in enumerate(self.rows)}
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self.rows)
@@ -61,6 +94,19 @@ class SampleModel(QAbstractTableModel):
         row = self.rows[index.row()]
         field = COLUMNS[index.column()][0]
         value = row[field]
+        if field in ("favorite", "rating"):
+            if role == Qt.DisplayRole:
+                if field == "favorite":
+                    return "★" if value else "☆"
+                return stars(value) if value else ""
+            if role == Qt.ForegroundRole and value:
+                return STAR_COLOR
+            if role == Qt.ForegroundRole:
+                return QColor("#9ca3af")
+            if role == Qt.TextAlignmentRole and field == "favorite":
+                return int(Qt.AlignCenter)
+            if role != Qt.ToolTipRole:
+                return None
         if role == Qt.DisplayRole:
             if value is None:
                 return "…" if not row["analyzed"] and field in ("bpm", "key", "duration") else ""
@@ -79,6 +125,8 @@ class SampleModel(QAbstractTableModel):
             tip = row["path"]
             if sources:
                 tip += "\nFuente → " + ", ".join(sources)
+            if row["tags"]:
+                tip += f"\nTags: {row['tags']}"
             if row["error"]:
                 tip += f"\nError: {row['error']}"
             return tip
@@ -87,15 +135,25 @@ class SampleModel(QAbstractTableModel):
         return None
 
     def sort(self, column, order=Qt.AscendingOrder) -> None:
+        # column -1: sin orden (el historial se muestra en orden de escucha)
+        self.sort_by = (column, order) if column >= 0 else None
+        if self.sort_by:
+            self.beginResetModel()
+            self.rows = self._sorted(self.rows)
+            self._reindex()
+            self.endResetModel()
+
+    def _sorted(self, rows: list[dict]) -> list[dict]:
+        if not self.sort_by:
+            return rows
+        column, order = self.sort_by
         field = COLUMNS[column][0]
-        numeric = field in ("bpm", "duration")
-        filled = [r for r in self.rows if r[field] is not None]
-        empty = [r for r in self.rows if r[field] is None]  # siempre al final
+        numeric = field in NUMERIC_FIELDS
+        filled = [r for r in rows if r[field] is not None]
+        empty = [r for r in rows if r[field] is None]  # siempre al final
         filled.sort(key=lambda r: r[field] if numeric else str(r[field]).lower(),
                     reverse=order == Qt.DescendingOrder)
-        self.beginResetModel()
-        self.rows = filled + empty
-        self.endResetModel()
+        return filled + empty
 
     # --- Arrastre: el DAW recibe una lista de archivos, igual que desde el Explorador ---
     def flags(self, index):
@@ -112,6 +170,156 @@ class SampleModel(QAbstractTableModel):
 
     def supportedDragActions(self):
         return Qt.CopyAction
+
+
+class ViewList(QListWidget):
+    """Panel "Biblioteca": toda la librería, el historial y las colecciones. Cada ítem guarda
+    (tipo, id) en UserRole. Acepta filas arrastradas desde la tabla sobre una colección."""
+
+    dropped = Signal(int, list)  # id de la colección, rutas
+
+    def __init__(self, source: QWidget) -> None:
+        super().__init__()
+        self.source = source
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def _target(self, event) -> int | None:
+        if event.source() is not self.source or not event.mimeData().hasUrls():
+            return None
+        item = self.itemAt(event.position().toPoint())
+        view = item.data(Qt.UserRole) if item else None
+        return view[1] if view and view[0] == "collection" else None
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is self.source and event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._target(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        collection = self._target(event)
+        if collection is None:
+            event.ignore()
+            return
+        paths = [os.path.normpath(u.toLocalFile()) for u in event.mimeData().urls()]
+        event.acceptProposedAction()
+        self.dropped.emit(collection, paths)
+
+
+class EditDialog(QDialog):
+    """Corrige tipo, instrumento, BPM y key de uno o varios samples, y les agrega o quita tags.
+    Cada campo arranca con el valor que comparten todos (o "(varios)"); solo se guarda lo que el
+    usuario cambió. `changes()` devuelve ({campo: valor}, tags a agregar, tags a quitar)."""
+
+    MIXED = "__mixed__"
+
+    def __init__(self, parent: QWidget, rows: list[dict], known_tags: list[str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Editar datos" if len(rows) == 1 else f"Editar {len(rows)} samples")
+        self.setMinimumWidth(380)
+        self.rows = rows
+
+        def common(field):
+            values = {r[field] for r in rows}
+            return values.pop() if len(values) == 1 else self.MIXED
+
+        def combo(field, options):
+            box = QComboBox()
+            value = common(field)
+            if value == self.MIXED:
+                box.addItem("(varios)", self.MIXED)
+            box.addItem("—", None)
+            for label, data in options:
+                box.addItem(label, data)
+            box.setCurrentIndex(max(0, box.findData(value)))
+            return box
+
+        self.kind = combo("kind", [(v, k) for k, v in KIND_LABELS.items()])
+        self.instrument = combo("instrument", sorted(
+            ((v, k) for k, v in INSTRUMENT_LABELS.items()), key=lambda e: e[0]))
+        self.key = combo("key", [(n + m, n + m) for n in NOTES for m in ("", "m")])
+        bpm = common("bpm")
+        self.bpm = QLineEdit("" if bpm in (None, self.MIXED) else f"{bpm:g}")
+        self.bpm.setPlaceholderText("(varios)" if bpm == self.MIXED else "—")
+        self.bpm.setValidator(QRegularExpressionValidator(
+            QRegularExpression(r"\d{0,3}([.,]\d{0,2})?"), self.bpm))
+        self.initial = {"kind": self.kind.currentIndex(),
+                        "instrument": self.instrument.currentIndex(),
+                        "key": self.key.currentIndex(), "bpm": self.bpm.text()}
+
+        # Tags: tildado = lo tienen todos; a medias = solo algunos.
+        sample_tags = [set((r["tags"] or "").split(", ")) - {""} for r in rows]
+        self.tags = QListWidget()
+        self.tags.setMaximumHeight(110)
+        for tag in sorted(set().union(*sample_tags), key=str.lower):
+            item = QListWidgetItem(tag)
+            n = sum(tag in t for t in sample_tags)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if n == len(rows):
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsUserTristate)
+                item.setCheckState(Qt.PartiallyChecked)
+            self.tags.addItem(item)
+        self.tags_initial = [self.tags.item(i).checkState() for i in range(self.tags.count())]
+        self.new_tags = QLineEdit(placeholderText="Separados por coma: oscuro, techno…")
+        completer = QCompleter(known_tags, self.new_tags)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.new_tags.setCompleter(completer)
+
+        form = QFormLayout()
+        form.addRow("Tipo", self.kind)
+        form.addRow("Instrumento", self.instrument)
+        form.addRow("BPM", self.bpm)
+        form.addRow("Key", self.key)
+        if self.tags.count():
+            form.addRow("Tags", self.tags)
+        form.addRow("Agregar tags", self.new_tags)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Lo que corregís acá queda con fuente <i>user</i>: re-escanear "
+                                "o re-analizar no lo pisa. Dejá el BPM vacío o elegí — para "
+                                "dejar un dato vacío.", wordWrap=True))
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        text = self.bpm.text().strip().replace(",", ".")
+        if text and text != self.initial["bpm"] and not 20 <= float(text) <= 400:
+            QMessageBox.warning(self, "BPM fuera de rango", "El BPM tiene que estar entre 20 "
+                                "y 400 (o vacío).")
+            return
+        super().accept()
+
+    def changes(self) -> tuple[dict, list[str], list[str]]:
+        fields = {}
+        for field, box in (("kind", self.kind), ("instrument", self.instrument),
+                           ("key", self.key)):
+            if box.currentIndex() != self.initial[field] and box.currentData() != self.MIXED:
+                fields[field] = box.currentData()
+        text = self.bpm.text().strip().replace(",", ".")
+        if text != self.initial["bpm"]:
+            fields["bpm"] = float(text) if text else None
+        add = [t.strip() for t in self.new_tags.text().split(",") if t.strip()]
+        remove = []
+        for i in range(self.tags.count()):
+            item = self.tags.item(i)
+            if item.checkState() == self.tags_initial[i]:
+                continue
+            if item.checkState() == Qt.Checked:
+                add.append(item.text())
+            elif item.checkState() == Qt.Unchecked:
+                remove.append(item.text())
+        return fields, add, remove
 
 
 class LibraryWorker(QObject):
@@ -168,12 +376,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Sample Scout {__version__}")
-        self.resize(1300, 800)
+        self.resize(1400, 820)
         self.conn = db.connect()
         self.thread: QThread | None = None
         self.worker: LibraryWorker | None = None
         self.tasks: list[tuple[QThread, TaskWorker]] = []  # referencias vivas mientras corren
         self.update_info: dict = {}
+        self._restoring = False  # refresh() restaurando la selección: no reproducir
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -221,12 +430,65 @@ class MainWindow(QMainWindow):
         rescan_action.triggered.connect(self.start_scan)
         toolbar.addAction(rescan_action)
         toolbar.addSeparator()
-        self.search = QLineEdit(placeholderText="Buscar (nombre, carpeta, pack…)", clearButtonEnabled=True)
+        self.search = QLineEdit(placeholderText="Buscar (nombre, carpeta, pack, tags…)",
+                                clearButtonEnabled=True)
         self.search.setMaximumWidth(420)
         self.search.textChanged.connect(self._schedule_refresh)
         toolbar.addWidget(self.search)
 
-        # Panel izquierdo: categorías y filtros.
+        # Tabla central (va primero: la lista de colecciones necesita saber de dónde vienen
+        # las filas que se le arrastran).
+        self.model = SampleModel()
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.horizontalHeader().setSortIndicator(1, Qt.AscendingOrder)  # por nombre
+        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setDragEnabled(True)
+        self.table.setDragDropMode(QAbstractItemView.DragOnly)
+        self.table.setDefaultDropAction(Qt.CopyAction)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(22)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        for col, width in enumerate(COLUMN_WIDTHS):
+            self.table.setColumnWidth(col, width)
+        self.table.selectionModel().currentRowChanged.connect(self._on_current_changed)
+        self.table.doubleClicked.connect(self._on_double_clicked)
+        self.table.clicked.connect(self._on_clicked)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
+
+        def shortcut(text, key, slot):
+            action = QAction(text, self, shortcut=QKeySequence(key))
+            action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            action.triggered.connect(slot)
+            self.table.addAction(action)
+            return action
+
+        shortcut("Reproducir / detener", Qt.Key_Space, self.toggle_play)
+        self.favorite_action = shortcut("Favorito", Qt.Key_F, self.toggle_favorite)
+        self.edit_action = shortcut("Editar datos y tags…", Qt.Key_F2, self.edit_selected)
+        self.remove_from_collection_action = shortcut(
+            "Quitar de esta colección", Qt.Key_Delete, self.remove_selected_from_collection)
+        self.rating_actions = []
+        for n in range(6):
+            self.rating_actions.append(shortcut(
+                stars(n) if n else "Sin estrellas", Qt.Key_0 + n,
+                lambda _checked=False, n=n: self.set_rating(n)))
+
+        # Panel izquierdo: biblioteca (historial y colecciones), categorías y filtros.
+        self.views = ViewList(self.table)
+        self.views.setMaximumHeight(170)
+        self.views.currentItemChanged.connect(self._on_view_changed)
+        self.views.dropped.connect(self._on_dropped_to_collection)
+        self.views.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.views.customContextMenuRequested.connect(self._views_menu)
+        new_collection = QPushButton("Nueva colección…")
+        new_collection.clicked.connect(self.new_collection)
+
         self.instruments = QListWidget()
         self.instruments.currentItemChanged.connect(self._schedule_refresh)
         self.kind = QComboBox()
@@ -243,6 +505,16 @@ class MainWindow(QMainWindow):
             self.key.addItem(note, note)
             self.key.addItem(note + "m", note + "m")
         self.key.currentIndexChanged.connect(self._schedule_refresh)
+        self.min_rating = QComboBox()
+        self.min_rating.addItem("Todas", 0)
+        for n in range(1, 6):
+            self.min_rating.addItem(stars(n) + (" o más" if n < 5 else ""), n)
+        self.min_rating.currentIndexChanged.connect(self._schedule_refresh)
+        self.tag = QComboBox()
+        self.tag.addItem("Todos", None)
+        self.tag.currentIndexChanged.connect(self._schedule_refresh)
+        self.favorites_only = QCheckBox("Solo favoritos")
+        self.favorites_only.toggled.connect(self._schedule_refresh)
         self.autoplay = QCheckBox("Escuchar al seleccionar", checked=True)
 
         filters = QFormLayout()
@@ -253,6 +525,9 @@ class MainWindow(QMainWindow):
         bpm_row.addWidget(self.bpm_max)
         filters.addRow("BPM", bpm_row)
         filters.addRow("Key", self.key)
+        filters.addRow("Estrellas", self.min_rating)
+        filters.addRow("Tag", self.tag)
+        filters.addRow("", self.favorites_only)
 
         self.roots = QListWidget()
         self.roots.setMaximumHeight(120)
@@ -261,6 +536,9 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        left_layout.addWidget(QLabel("<b>Biblioteca</b>"))
+        left_layout.addWidget(self.views)
+        left_layout.addWidget(new_collection)
         left_layout.addWidget(QLabel("<b>Instrumento</b>"))
         left_layout.addWidget(self.instruments, 1)
         left_layout.addLayout(filters)
@@ -269,36 +547,10 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.roots)
         left_layout.addWidget(remove_root)
 
-        # Tabla central.
-        self.model = SampleModel()
-        self.table = QTableView()
-        self.table.setModel(self.model)
-        self.table.setSortingEnabled(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setDragEnabled(True)
-        self.table.setDragDropMode(QAbstractItemView.DragOnly)
-        self.table.setDefaultDropAction(Qt.CopyAction)
-        self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(22)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        for col, width in enumerate((340, 100, 80, 60, 60, 80)):
-            self.table.setColumnWidth(col, width)
-        self.table.selectionModel().currentRowChanged.connect(self._on_current_changed)
-        self.table.doubleClicked.connect(lambda index: self.play(index.row()))
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._context_menu)
-
-        play_action = QAction("Reproducir / detener", self, shortcut=QKeySequence(Qt.Key_Space))
-        play_action.triggered.connect(self.toggle_play)
-        self.table.addAction(play_action)
-
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(self.table)
-        splitter.setSizes([260, 1040])
+        splitter.setSizes([270, 1130])
 
         # Aviso de versión nueva (oculto hasta que el chequeo encuentre una)
         self.banner = QFrame(objectName="updateBanner")
@@ -332,10 +584,17 @@ class MainWindow(QMainWindow):
         self.search_timer.start()
 
     # --- Datos ---
+    def current_view(self) -> tuple[str, int | None]:
+        """("all", None), ("history", None) o ("collection", id)."""
+        item = self.views.currentItem()
+        return item.data(Qt.UserRole) if item else ("all", None)
+
     def refresh(self) -> None:
-        """Vuelve a consultar la base con los filtros actuales y actualiza tabla, panel y estado."""
+        """Vuelve a consultar la base con los filtros actuales y actualiza tabla, panel y estado.
+        Conserva la selección y la posición de la lista (sin volver a reproducir)."""
         self._refresh_sidebar()
         item = self.instruments.currentItem()
+        view, view_id = self.current_view()
         rows = db.search(
             self.conn,
             text=self.search.text(),
@@ -344,13 +603,60 @@ class MainWindow(QMainWindow):
             bpm_min=self.bpm_min.value() or None,
             bpm_max=self.bpm_max.value() or None,
             key=self.key.currentData(),
+            favorites=self.favorites_only.isChecked(),
+            min_rating=self.min_rating.currentData() or 0,
+            tag=self.tag.currentData(),
+            collection=view_id if view == "collection" else None,
+            history=view == "history",
         )
-        self.model.set_rows(rows)
+        selected = self.selected_paths()
+        current = self.table.currentIndex()
+        current_path = self.model.rows[current.row()]["path"] if current.isValid() else None
+        scroll = self.table.verticalScrollBar().value()
+        self._restoring = True
+        try:
+            self.model.set_rows(rows)
+            self._select_paths(selected, current_path)
+            self.table.verticalScrollBar().setValue(scroll)
+        finally:
+            self._restoring = False
         total, pending = db.stats(self.conn)
         busy = " — trabajando…" if self.thread else ""
         self.status.setText(f"{len(rows)} de {total} samples · {pending} sin analizar{busy}")
 
+    def _select_paths(self, paths: list[str], current: str | None) -> None:
+        selection = QItemSelection()
+        last = len(COLUMNS) - 1
+        for path in paths:
+            row = self.model.row_of(path)
+            if row is not None:
+                selection.select(self.model.index(row, 0), self.model.index(row, last))
+        self.table.selectionModel().select(selection, QItemSelectionModel.ClearAndSelect)
+        row = self.model.row_of(current) if current else None
+        if row is not None:
+            self.table.selectionModel().setCurrentIndex(self.model.index(row, 1),
+                                                        QItemSelectionModel.NoUpdate)
+
     def _refresh_sidebar(self) -> None:
+        # Biblioteca: toda la librería, historial y colecciones.
+        selected_view = self.current_view()
+        total, _pending = db.stats(self.conn)
+        entries = [("Toda la librería", ("all", None), total),
+                   ("Historial", ("history", None), db.history_count(self.conn))]
+        entries += [(f"▸ {c['name']}", ("collection", c["id"]), c["n"])
+                    for c in db.list_collections(self.conn)]
+        self.views.blockSignals(True)
+        self.views.clear()
+        for label, value, n in entries:
+            item = QListWidgetItem(f"{label}  ({n})")
+            item.setData(Qt.UserRole, value)
+            self.views.addItem(item)
+            if value == selected_view:
+                self.views.setCurrentItem(item)
+        if self.views.currentItem() is None:
+            self.views.setCurrentRow(0)
+        self.views.blockSignals(False)
+
         current = self.instruments.currentItem()
         selected = current.data(Qt.UserRole) if current else None
         counts = db.instrument_counts(self.conn)
@@ -373,8 +679,166 @@ class MainWindow(QMainWindow):
             self.instruments.setCurrentRow(0)
         self.instruments.blockSignals(False)
 
+        selected_tag = self.tag.currentData()
+        self.tag.blockSignals(True)
+        self.tag.clear()
+        self.tag.addItem("Todos", None)
+        for tag, n in db.all_tags(self.conn):
+            self.tag.addItem(f"{tag}  ({n})", tag)
+        self.tag.setCurrentIndex(max(0, self.tag.findData(selected_tag)))
+        self.tag.blockSignals(False)
+
         self.roots.clear()
         self.roots.addItems(db.list_roots(self.conn))
+
+    def _on_view_changed(self, *_args) -> None:
+        # El historial se muestra en orden de escucha: se saca el orden por columna.
+        if self.current_view()[0] == "history":
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self._schedule_refresh()
+
+    # --- Datos del usuario: favoritos, estrellas, colecciones, edición ---
+    def selected_paths(self) -> list[str]:
+        return [self.model.rows[i.row()]["path"]
+                for i in self.table.selectionModel().selectedRows()]
+
+    def _selected_rows(self) -> list[dict]:
+        return [self.model.rows[i.row()] for i in self.table.selectionModel().selectedRows()]
+
+    def _reload_rows(self, paths: list[str]) -> None:
+        """Actualiza esas filas en la tabla sin recargar todo (no salta ni cambia el orden)."""
+        self.model.update_rows(db.get_samples(self.conn, paths))
+
+    def toggle_favorite(self, paths: list[str] | None = None) -> None:
+        """Marca como favoritos los elegidos; si ya lo eran todos, los desmarca."""
+        rows = ([self.model.rows[self.model.row_of(p)] for p in paths] if paths
+                else self._selected_rows())
+        if not rows:
+            return
+        favorite = not all(r["favorite"] for r in rows)
+        db.set_favorite(self.conn, [r["path"] for r in rows], favorite)
+        self._reload_rows([r["path"] for r in rows])
+
+    def set_rating(self, rating: int, paths: list[str] | None = None) -> None:
+        paths = paths or self.selected_paths()
+        if paths:
+            db.set_rating(self.conn, paths, rating)
+            self._reload_rows(paths)
+
+    def _on_clicked(self, index: QModelIndex) -> None:
+        """Clic en la estrella marca el favorito; clic en las estrellas pone esa cantidad
+        (clic en la misma cantidad las borra)."""
+        row = self.model.rows[index.row()]
+        if index.column() == FAVORITE_COLUMN:
+            self.toggle_favorite([row["path"]])
+        elif index.column() == RATING_COLUMN:
+            rect = self.table.visualRect(index)
+            star = max(1, self.table.fontMetrics().horizontalAdvance("★"))
+            x = self.table.viewport().mapFromGlobal(QCursor.pos()).x() - rect.left() - 3
+            n = min(5, max(1, x // star + 1))
+            self.set_rating(0 if n == row["rating"] else n, [row["path"]])
+
+    def _on_double_clicked(self, index: QModelIndex) -> None:
+        if index.column() not in (FAVORITE_COLUMN, RATING_COLUMN):
+            self.play(index.row())
+
+    def edit_selected(self) -> None:
+        """Abre el diálogo de edición para las filas elegidas y guarda lo que cambió."""
+        rows = self._selected_rows()
+        if not rows:
+            return
+        dialog = EditDialog(self, rows, [t for t, _n in db.all_tags(self.conn)])
+        if dialog.exec() != QDialog.Accepted:
+            return
+        fields, add, remove = dialog.changes()
+        paths = [r["path"] for r in rows]
+        for field, value in fields.items():
+            db.set_user_field(self.conn, paths, field, value)
+        if add:
+            db.add_tags(self.conn, paths, add)
+        if remove:
+            db.remove_tags(self.conn, paths, remove)
+        if fields or add or remove:
+            self.refresh()
+
+    def reset_selected(self) -> None:
+        """Descarta las correcciones manuales: el próximo escaneo recalcula esos samples."""
+        paths = self.selected_paths()
+        if not paths:
+            return
+        db.clear_user_fields(self.conn, paths)
+        if self.thread:
+            self.statusBar().showMessage(
+                "Se recalculan con el próximo Re-escanear (hay un análisis en curso).", 6000)
+        else:
+            self.start_scan()
+
+    def new_collection(self, paths: list[str] | None = None) -> int | None:
+        """Pide un nombre y crea la colección (con esos samples, si se pasan)."""
+        name, ok = QInputDialog.getText(self, "Nueva colección", "Nombre:")
+        if not ok or not name.strip():
+            return None
+        try:
+            collection = db.create_collection(self.conn, name)
+        except sqlite3.IntegrityError:
+            QMessageBox.warning(self, "Nueva colección", f"Ya hay una colección «{name}».")
+            return None
+        if paths:
+            db.add_to_collection(self.conn, collection, paths)
+        self._refresh_sidebar()
+        return collection
+
+    def add_selected_to_collection(self, collection: int) -> None:
+        db.add_to_collection(self.conn, collection, self.selected_paths())
+        self._refresh_sidebar()
+
+    def _on_dropped_to_collection(self, collection: int, paths: list[str]) -> None:
+        db.add_to_collection(self.conn, collection, paths)
+        self._refresh_sidebar()
+        self.statusBar().showMessage(f"{len(paths)} sample(s) agregados a la colección.", 4000)
+
+    def remove_selected_from_collection(self) -> None:
+        view, collection = self.current_view()
+        paths = self.selected_paths()
+        if view == "collection" and paths:
+            db.remove_from_collection(self.conn, collection, paths)
+            self.refresh()
+
+    def _views_menu(self, pos) -> None:
+        item = self.views.itemAt(pos)
+        menu = QMenu(self)
+        menu.addAction("Nueva colección…", self.new_collection)
+        view = item.data(Qt.UserRole) if item else None
+        if view and view[0] == "collection":
+            name = next(c["name"] for c in db.list_collections(self.conn) if c["id"] == view[1])
+            menu.addAction("Renombrar…", lambda: self.rename_collection(view[1], name))
+            menu.addAction("Borrar colección", lambda: self.delete_collection(view[1], name))
+        elif view and view[0] == "history":
+            menu.addAction("Vaciar historial", self.clear_history)
+        menu.exec(self.views.viewport().mapToGlobal(pos))
+
+    def rename_collection(self, collection: int, name: str) -> None:
+        new, ok = QInputDialog.getText(self, "Renombrar colección", "Nombre:", text=name)
+        if not ok or not new.strip() or new.strip() == name:
+            return
+        try:
+            db.rename_collection(self.conn, collection, new)
+        except sqlite3.IntegrityError:
+            QMessageBox.warning(self, "Renombrar colección", f"Ya hay una colección «{new}».")
+            return
+        self._refresh_sidebar()
+
+    def delete_collection(self, collection: int, name: str) -> None:
+        answer = QMessageBox.question(
+            self, "Borrar colección",
+            f"¿Borrar la colección «{name}»? Los samples siguen en la librería.")
+        if answer == QMessageBox.Yes:
+            db.delete_collection(self.conn, collection)
+            self.refresh()
+
+    def clear_history(self) -> None:
+        db.clear_history(self.conn)
+        self.refresh()
 
     # --- Carpetas y escaneo ---
     def add_folder(self) -> None:
@@ -415,13 +879,17 @@ class MainWindow(QMainWindow):
 
     # --- Preescucha ---
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
-        if current.isValid() and self.autoplay.isChecked():
+        if current.isValid() and self.autoplay.isChecked() and not self._restoring:
             self.play(current.row())
 
     def play(self, row: int) -> None:
+        """Reproduce la fila y la anota en el historial (la lista no se recarga, para no
+        reordenar el historial mientras se lo recorre)."""
+        path = self.model.rows[row]["path"]
         self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(self.model.rows[row]["path"]))
+        self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
+        db.add_history(self.conn, path)
 
     def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -434,7 +902,30 @@ class MainWindow(QMainWindow):
         if not index.isValid():
             return
         path = self.model.rows[index.row()]["path"]
+        rows = self._selected_rows()
         menu = QMenu(self)
+        self.favorite_action.setText("Quitar de favoritos" if all(r["favorite"] for r in rows)
+                                     else "Marcar como favorito")
+        menu.addAction(self.favorite_action)
+        rating_menu = menu.addMenu("Estrellas")
+        rating_menu.addActions(self.rating_actions[1:] + self.rating_actions[:1])
+
+        collections_menu = menu.addMenu("Agregar a colección")
+        for c in db.list_collections(self.conn):
+            collections_menu.addAction(
+                c["name"], lambda c=c: self.add_selected_to_collection(c["id"]))
+        if not collections_menu.isEmpty():
+            collections_menu.addSeparator()
+        collections_menu.addAction(
+            "Nueva colección…", lambda: self.new_collection(self.selected_paths()))
+        if self.current_view()[0] == "collection":
+            menu.addAction(self.remove_from_collection_action)
+
+        menu.addSeparator()
+        menu.addAction(self.edit_action)
+        if any(r[f"{f}_source"] == "user" for r in rows for f in db.EDITABLE_FIELDS):
+            menu.addAction("Restablecer datos automáticos", self.reset_selected)
+        menu.addSeparator()
         menu.addAction("Mostrar en el Explorador",
                        lambda: subprocess.Popen(["explorer", "/select,", path]))
         menu.addAction("Copiar ruta", lambda: QGuiApplication.clipboard().setText(path))
