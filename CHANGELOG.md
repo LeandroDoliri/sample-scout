@@ -23,6 +23,9 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 - Portada del sample pack: se detecta al escanear (la imagen más cercana hasta la carpeta
   agregada) y se muestra en un panel de detalle a la derecha y como miniatura en cada fila.
   Las imágenes se cargan en segundo plano.
+- Columnas a elección: clic derecho en el encabezado para mostrar u ocultar cada una o
+  restablecerlas, y arrastre para reordenarlas. Visibilidad, orden y ancho se recuerdan entre
+  aperturas; las columnas que sume una versión nueva aparecen a la vista.
 
 ### Cambiado
 - La base pasa al esquema 2 (se migra sola, sin perder datos). Los datos del usuario se guardan

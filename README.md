@@ -46,7 +46,10 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
    Con las flechas recorrés la lista escuchando, y `Espacio` reproduce o detiene.
 4. **Arrastrá** una o varias filas (`Ctrl`/`Shift` para elegir varias) a Ableton, al Explorador
    o a cualquier programa que acepte archivos. Se arrastra el archivo original.
-5. **Ordená** haciendo clic en el encabezado de cualquier columna.
+5. **Ordená** haciendo clic en el encabezado de cualquier columna. **Clic derecho** en el
+   encabezado para elegir qué columnas ver (siempre queda al menos una) o *Restablecer
+   columnas*; arrastrá un encabezado para cambiar el orden. Las columnas visibles, su orden y
+   su ancho se recuerdan entre aperturas (en `settings.ini`, al lado de la base).
 6. **Clic derecho** sobre una o varias filas: favorito, estrellas, colecciones, editar datos y
    tags, mostrar en el Explorador o copiar la ruta.
 7. **Portada y detalle:** el panel de la derecha muestra la portada del pack y los datos del
@@ -146,6 +149,8 @@ Nunca se actualiza sin preguntar. Sin internet, no muestra nada.
   historial y correcciones, que viven en la misma base. Las bases de versiones anteriores se
   actualizan solas al abrir la app, sin perder nada.
 - Con la app abierta sin consola, los errores se guardan en `%APPDATA%\SampleScout\app.log`.
+- La disposición de las columnas está en `%APPDATA%\SampleScout\settings.ini`. Borrarlo
+  equivale a *Restablecer columnas*.
 - La única conexión a internet es la consulta de versiones a la API pública de GitHub.
 
 ## Solución de problemas

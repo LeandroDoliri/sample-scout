@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -12,8 +13,8 @@ import traceback
 from collections import OrderedDict
 
 from PySide6.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
-                            QModelIndex, QObject, QRegularExpression, QRunnable, QSize, Qt,
-                            QThread, QThreadPool, QTimer, QUrl, Signal)
+                            QModelIndex, QObject, QRegularExpression, QRunnable, QSettings, QSize,
+                            Qt, QThread, QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
                            QIcon, QImage, QImageReader, QKeySequence, QPixmap,
                            QRegularExpressionValidator)
@@ -38,12 +39,13 @@ COLUMNS = [
     ("bpm", "BPM"), ("key", "Key"), ("rating", "Estrellas"), ("duration", "Duración"),
     ("tags", "Tags"), ("folder", "Carpeta"),
 ]
-COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 140)
+COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 140, 200)
 FAVORITE_COLUMN = 0
 NAME_COLUMN = 1
 RATING_COLUMN = 6
 NUMERIC_FIELDS = ("favorite", "bpm", "rating", "duration")
 KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
+COLUMN_MENU_LABELS = {"favorite": "Favorito"}  # en el menú de columnas, "★" solo no se entiende
 STAR_COLOR = QColor("#d4a017")
 
 
@@ -550,8 +552,12 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
+        header.setSectionsMovable(True)  # reordenar arrastrando los encabezados
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._header_menu)
         for col, width in enumerate(COLUMN_WIDTHS):
             self.table.setColumnWidth(col, width)
+        self._restore_columns()
         self.table.selectionModel().currentRowChanged.connect(self._on_current_changed)
         self.table.doubleClicked.connect(self._on_double_clicked)
         self.table.clicked.connect(self._on_clicked)
@@ -1135,7 +1141,78 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.warning(self, "No se pudo actualizar", f"No se pudo actualizar: {exc}.")
 
+    # --- Columnas: cuáles se ven, en qué orden y con qué ancho ---
+    def _settings(self) -> QSettings:
+        # Al lado de la base: con SAMPLE_SCOUT_DB las pruebas no tocan la configuración real.
+        return QSettings(str(db.default_db_path().parent / "settings.ini"), QSettings.IniFormat)
+
+    def _header_menu(self, pos) -> None:
+        header = self.table.horizontalHeader()
+        menu = QMenu(self)
+        visible = [i for i in range(len(COLUMNS)) if not header.isSectionHidden(i)]
+        for i in sorted(range(len(COLUMNS)), key=header.visualIndex):
+            field, label = COLUMNS[i]
+            action = menu.addAction(COLUMN_MENU_LABELS.get(field, label))
+            action.setCheckable(True)
+            action.setChecked(i in visible)
+            action.setEnabled(visible != [i])  # al menos una columna a la vista
+            action.toggled.connect(lambda on, i=i: self._set_column_visible(i, on))
+        menu.addSeparator()
+        menu.addAction("Restablecer columnas", self.reset_columns)
+        menu.exec(header.viewport().mapToGlobal(pos))
+
+    def _set_column_visible(self, column: int, visible: bool) -> None:
+        header = self.table.horizontalHeader()
+        header.setSectionHidden(column, not visible)
+        if visible and header.sectionSize(column) < 20:
+            header.resizeSection(column, COLUMN_WIDTHS[column])
+        self._save_columns()
+
+    def reset_columns(self) -> None:
+        """Todas las columnas a la vista, en el orden y el ancho de fábrica."""
+        header = self.table.horizontalHeader()
+        for i in range(len(COLUMNS)):
+            header.moveSection(header.visualIndex(i), i)
+            header.setSectionHidden(i, False)
+            header.resizeSection(i, COLUMN_WIDTHS[i])
+        self._settings().remove("columns")
+
+    def _save_columns(self) -> None:
+        """Guarda por nombre de campo (no con header.saveState()): si una versión nueva suma
+        columnas, el estado viejo sigue sirviendo y las nuevas aparecen a la vista."""
+        header = self.table.horizontalHeader()
+        state = {field: {"pos": header.visualIndex(i), "hidden": header.isSectionHidden(i),
+                         "width": header.sectionSize(i) or COLUMN_WIDTHS[i]}
+                 for i, (field, _label) in enumerate(COLUMNS)}
+        self._settings().setValue("columns", json.dumps(state))
+
+    def _restore_columns(self) -> None:
+        try:
+            state = json.loads(self._settings().value("columns", "") or "{}")
+        except (TypeError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        fields = [field for field, _label in COLUMNS]
+        known = sorted((f for f in fields if f in state), key=lambda f: state[f].get("pos", 0))
+        order = known[:]
+        for i, field in enumerate(fields):  # las columnas nuevas, en su lugar de fábrica
+            if field not in state:
+                order.insert(min(i, len(order)), field)
+        header = self.table.horizontalHeader()
+        for pos, field in enumerate(order):
+            i = fields.index(field)
+            header.moveSection(header.visualIndex(i), pos)
+            saved = state.get(field, {})
+            header.setSectionHidden(i, bool(saved.get("hidden")))
+            width = saved.get("width")
+            if isinstance(width, int) and width >= 20:
+                header.resizeSection(i, width)
+        if all(header.isSectionHidden(i) for i in range(len(fields))):
+            header.setSectionHidden(NAME_COLUMN, False)
+
     def closeEvent(self, event) -> None:
+        self._save_columns()
         if self.worker:
             self.worker.stop()
             self.thread.quit()
