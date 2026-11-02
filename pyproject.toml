@@ -9,7 +9,8 @@ description = "Librería de samples que se analiza y ordena sola, con arrastre d
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "PySide6>=6.8",
+    "PySide6-Essentials>=6.8",
+    "PySide6-Addons>=6.8",  # QtMultimedia (preescucha); sin QtWebEngine ni QtPdf
     "librosa>=0.10",
     "soundfile>=0.12",
     "numpy",

@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import subprocess
 import sys
+import traceback
 
 from PySide6.QtCore import (QAbstractTableModel, QMimeData, QModelIndex, QObject, Qt, QThread,
                             QTimer, QUrl, Signal)
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-                               QPushButton, QSpinBox, QSplitter, QTableView, QToolBar,
-                               QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QSpinBox, QSplitter, QTableView,
+                               QToolBar, QVBoxLayout, QWidget)
 
-from sample_scout import db, scanner
+from sample_scout import APP_DIR, __version__, db, scanner, updater
 from sample_scout.analyzer import NOTES
 from sample_scout.parser import INSTRUMENT_LABELS
+
+# Igual que el AppUserModelID de los accesos directos del instalador: así la ventana y el
+# acceso directo son la misma app en la barra de tareas
+APP_USER_MODEL_ID = "LeandroDoliri.SampleScout"
 
 COLUMNS = [
     ("name", "Nombre"), ("instrument", "Instrumento"), ("kind", "Tipo"), ("bpm", "BPM"),
@@ -134,14 +140,34 @@ class LibraryWorker(QObject):
             self.finished.emit()
 
 
+class TaskWorker(QObject):
+    """Corre una función en otro hilo. La función recibe `progress.emit` para informar avances."""
+
+    progress = Signal(str)
+    done = Signal(object)
+    failed = Signal(object)
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self.fn = fn
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self.fn(self.progress.emit))
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Sample Scout")
+        self.setWindowTitle(f"Sample Scout {__version__}")
         self.resize(1300, 800)
         self.conn = db.connect()
         self.thread: QThread | None = None
         self.worker: LibraryWorker | None = None
+        self.tasks: list[tuple[QThread, TaskWorker]] = []  # referencias vivas mientras corren
+        self.update_info: dict = {}
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -154,6 +180,27 @@ class MainWindow(QMainWindow):
         self.refresh()
         if db.list_roots(self.conn):
             self.start_scan()
+        self.run_task(lambda _log: updater.check(), self._on_update_checked)
+
+    def run_task(self, fn, on_done, on_failed=None) -> None:
+        thread = QThread(self)
+        worker = TaskWorker(fn)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.statusBar().showMessage)
+        worker.done.connect(on_done)
+        worker.failed.connect(on_failed or (lambda exc: None))
+        entry = (thread, worker)
+
+        def cleanup(*_args):
+            thread.quit()
+            thread.wait()
+            self.tasks.remove(entry)
+
+        worker.done.connect(cleanup)
+        worker.failed.connect(cleanup)
+        self.tasks.append(entry)
+        thread.start()
 
     # --- UI ---
     def _build_ui(self) -> None:
@@ -244,7 +291,32 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left)
         splitter.addWidget(self.table)
         splitter.setSizes([260, 1040])
-        self.setCentralWidget(splitter)
+
+        # Aviso de versión nueva (oculto hasta que el chequeo encuentre una)
+        self.banner = QFrame(objectName="updateBanner")
+        self.banner.setStyleSheet(
+            "#updateBanner { background: #0f766e; } #updateBanner QLabel { color: white; }")
+        banner_layout = QHBoxLayout(self.banner)
+        banner_layout.setContentsMargins(12, 6, 12, 6)
+        self.banner_text = QLabel()
+        self.banner_update = QPushButton("Actualizar")
+        self.banner_update.clicked.connect(self.apply_update)
+        banner_notes = QPushButton("Ver novedades")
+        banner_notes.clicked.connect(self.open_release_page)
+        banner_close = QPushButton("Más tarde")
+        banner_close.clicked.connect(self.banner.hide)
+        banner_layout.addWidget(self.banner_text, 1)
+        for button in (self.banner_update, banner_notes, banner_close):
+            banner_layout.addWidget(button)
+        self.banner.hide()
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.banner)
+        central_layout.addWidget(splitter, 1)
+        self.setCentralWidget(central)
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
 
@@ -358,6 +430,59 @@ class MainWindow(QMainWindow):
         menu.addAction("Copiar ruta", lambda: QGuiApplication.clipboard().setText(path))
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    # --- Actualización ---
+    def _on_update_checked(self, info: dict) -> None:
+        self.update_info = info
+        if not info.get("available"):
+            return
+        text = f"<b>Hay una versión nueva: {info['latest']}</b> (tenés la {info['current']})."
+        if info["reason"] == "git":
+            text += " Estás usando el código del repositorio: actualizá con git pull."
+        elif info["reason"] == "installer":
+            text += " Esta versión se instala con el instalador completo."
+        self.banner_text.setText(text)
+        self.banner_update.setVisible(info["reason"] != "git")
+        self.banner_update.setText("Descargar instalador" if info["reason"] == "installer"
+                                   else "Actualizar")
+        self.banner.show()
+
+    def open_release_page(self) -> None:
+        # Solo la página que devolvió la API de GitHub
+        page = self.update_info.get("page", "")
+        if page.startswith("https://"):
+            QDesktopServices.openUrl(QUrl(page))
+
+    def apply_update(self) -> None:
+        if self.update_info.get("reason") == "installer":
+            self.open_release_page()
+            return
+        if self.thread:  # que el análisis no escriba mientras se reemplazan los archivos
+            self.worker.stop()
+            self.statusBar().showMessage("Deteniendo el análisis…")
+            self.thread.quit()
+            self.thread.wait(10000)
+        self.banner_update.setEnabled(False)
+        self.run_task(updater.apply, self._on_update_applied, self._on_update_failed)
+
+    def _on_update_applied(self, version: str) -> None:
+        self.statusBar().showMessage(f"Sample Scout {version} instalado. Reiniciando…")
+        updater.restart()
+        QTimer.singleShot(800, self.close)
+
+    def _on_update_failed(self, exc: Exception) -> None:
+        self.banner_update.setEnabled(True)
+        self.statusBar().clearMessage()
+        if isinstance(exc, updater.NeedsInstaller):
+            answer = QMessageBox.question(
+                self, "Hace falta el instalador",
+                "Esta versión cambia el Python que trae la app y se instala con el instalador "
+                "completo. Instalalo encima: no se pierde nada (tu librería queda igual).\n\n"
+                "¿Abrir la página de descarga?")
+            if answer == QMessageBox.Yes:
+                self.open_release_page()
+            return
+        QMessageBox.warning(self, "No se pudo actualizar", f"No se pudo actualizar: {exc}.")
+
     def closeEvent(self, event) -> None:
         if self.worker:
             self.worker.stop()
@@ -366,10 +491,31 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _setup_logging() -> None:
+    """Con pythonw no hay consola: los errores van a %APPDATA%\\SampleScout\\app.log."""
+    if sys.stderr is not None:
+        return
+    log = open(db.default_db_path().parent / "app.log", "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = log
+
+    def hook(exc_type, exc, tb):
+        traceback.print_exception(exc_type, exc, tb, file=log)
+
+    sys.excepthook = hook
+
+
 def main() -> None:
     multiprocessing.freeze_support()
+    _setup_logging()
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     app = QApplication(sys.argv)
     app.setApplicationName("Sample Scout")
+    icon = APP_DIR / "icon.ico"
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

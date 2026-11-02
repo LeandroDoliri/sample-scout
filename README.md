@@ -4,6 +4,29 @@ Librería de samples para Windows que **se analiza y ordena sola**, sin mover ni
 archivos. Elegís las carpetas, la app indexa todo, detecta tipo, BPM, tonalidad e instrumento,
 y desde la lista arrastrás el sample directo a Ableton (o a cualquier DAW).
 
+[![Descargar instalador para Windows](https://img.shields.io/badge/Descargar-instalador%20para%20Windows-0f766e?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/LeandroDoliri/sample-scout/releases/latest/download/SampleScoutSetup.exe)
+
+## Instalación (Windows)
+
+Descargá y ejecutá `SampleScoutSetup.exe` (con el botón de arriba o desde
+[Releases](https://github.com/LeandroDoliri/sample-scout/releases/latest)). Trae todo lo
+necesario, no pide permisos de administrador y crea accesos directos en el menú Inicio y, si
+querés, en el escritorio. Se desinstala desde "Agregar o quitar programas". Tu librería
+(`%APPDATA%\SampleScout`) se conserva al actualizar y al desinstalar.
+
+**Se actualiza sola:** al abrirla revisa si hay una versión nueva en Releases. Si la hay,
+muestra un aviso con el botón **Actualizar**: baja solo los archivos de la app, los verifica y
+se reinicia. Nunca actualiza sin preguntar.
+
+> **Control inteligente de aplicaciones (Windows 11):** si está activado, Windows bloquea el
+> Setup porque no tiene firma digital (falla sin mostrar nada). En esa PC, cloná el repo e
+> instalá con el script, que deja lo mismo en la misma carpeta:
+>
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File tools\build_installer.ps1 -NoSetup
+> powershell -ExecutionPolicy Bypass -File tools\install_local.ps1
+> ```
+
 ## Cómo ordena la librería
 
 Cada dato se completa con la fuente más confiable disponible. El tooltip de cada fila muestra
@@ -49,6 +72,25 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 
 `SAMPLE_SCOUT_DB=ruta\otra.db` usa otra base, útil para pruebas.
 
+### Generar el instalador
+
+```powershell
+winget install JRSoftware.InnoSetup
+powershell -ExecutionPolicy Bypass -File tools\build_installer.ps1
+```
+
+La versión sale del archivo `VERSION`. En `dist\` quedan el instalador y
+`SampleScout-update-<versión>.zip`, el paquete que usa la actualización desde la app.
+
+### Publicar una versión
+
+1. Subí el número en `VERSION`. Si la versión nueva necesita otro Python, subí también
+   `RUNTIME`: así las instalaciones viejas piden el instalador completo en lugar de
+   actualizarse desde el zip.
+2. Commiteá y pusheá a `main`.
+3. Ejecutá `powershell -ExecutionPolicy Bypass -File tools\release.ps1 [-Notes "qué cambió"]`.
+   Compila y crea el release `vX.Y.Z` con `SampleScoutSetup.exe` y el zip de actualización.
+
 ## Próximos pasos
 
 1. **Clasificación con un modelo** (PANNs o CLAP) para instrumentos de loops y material
@@ -56,4 +98,3 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 2. **"Sonidos parecidos"** con embeddings y vecinos más cercanos.
 3. **Búsqueda por texto libre** con CLAP ("kick oscuro con punch").
 4. Preescucha sincronizada al tempo del proyecto y filtro por tonalidad relativa.
-5. Empaquetado con PyInstaller como `.exe`.
