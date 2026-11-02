@@ -16,6 +16,10 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
   la búsqueda y la búsqueda por sonido. Clic derecho: *Abrir en el Explorador*, *Agregar todo a
   una colección* y *Quitar de la librería*. Desde la lista, clic derecho → *Ir a su carpeta*.
   Se recuerdan el modo, la carpeta abierta y las carpetas desplegadas.
+- La forma de onda de cada sample se ve **siempre** en la lista, en la columna *Onda* (más
+  ancha y con filas un poco más altas para que se lea). Se puede mover pero no ocultar; si la
+  tenías oculta, vuelve a aparecer. Las filas que todavía no tienen onda la piden en segundo
+  plano, solo las que están a la vista.
 
 ### Cambiado
 - La base pasa al esquema 5 (índice por carpeta, para armar el árbol y filtrar rápido); las
