@@ -49,6 +49,12 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
 5. **Ordená** haciendo clic en el encabezado de cualquier columna.
 6. **Clic derecho** sobre una o varias filas: favorito, estrellas, colecciones, editar datos y
    tags, mostrar en el Explorador o copiar la ruta.
+7. **Portada y detalle:** el panel de la derecha muestra la portada del pack y los datos del
+   sample elegido, y cada fila lleva una miniatura de la portada. La portada es la imagen
+   (`.jpg`, `.jpeg`, `.png` o `.webp`) más cercana subiendo desde la carpeta del sample hasta
+   la carpeta que agregaste, nunca más arriba. Si en una carpeta hay varias, gana la que se
+   llama `cover…`, `artwork…`, `folder…`, `front…` o como el pack; si no, la más pesada. Se
+   busca al escanear: si agregás una portada a un pack, aparece con **Re-escanear**.
 
 ### Organizar a mano
 

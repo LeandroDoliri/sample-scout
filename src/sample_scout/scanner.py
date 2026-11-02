@@ -21,7 +21,62 @@ from sample_scout.metadata import read_acid
 from sample_scout.parser import DRUM_INSTRUMENTS, parse_path
 
 AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+COVER_WORDS = ("cover", "artwork", "folder", "front", "albumart")
 Progress = Callable[[str], None]
+
+
+def _norm(text: str) -> str:
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+class CoverFinder:
+    """Portada de cada carpeta de una raíz: la imagen más cercana subiendo desde la carpeta del
+    sample hasta `root` (nunca más arriba). En cada nivel gana una imagen con nombre de portada
+    (`cover…`, `artwork…`, `folder…`, `front…`, o el nombre de esa carpeta o del pack); si no
+    hay, la más pesada. Lista cada carpeta una sola vez."""
+
+    def __init__(self, root: str) -> None:
+        self.root = os.path.normpath(root)
+        self._level: dict[str, str | None] = {}  # mejor imagen de cada carpeta, sin subir
+        self._cover: dict[str, str | None] = {}  # resultado subiendo
+
+    def cover_for(self, folder: str) -> str | None:
+        folder = os.path.normpath(folder)
+        if folder not in self._cover:
+            cover = self._best_in(folder)
+            if cover is None and folder != self.root:
+                parent = os.path.dirname(folder)
+                inside = os.path.commonpath([parent, self.root]) == self.root
+                if parent != folder and inside:
+                    cover = self.cover_for(parent)
+            self._cover[folder] = cover
+        return self._cover[folder]
+
+    def _best_in(self, folder: str) -> str | None:
+        if folder in self._level:
+            return self._level[folder]
+        names = {_norm(os.path.basename(folder))}
+        rel = os.path.relpath(folder, self.root)
+        if rel != ".":
+            names.add(_norm(rel.split(os.sep)[0]))  # carpeta del pack
+        names.discard("")
+        preferred, others = [], []
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if (Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS
+                            or not entry.is_file()):
+                        continue
+                    stem = _norm(Path(entry.name).stem)
+                    size = entry.stat().st_size
+                    named = stem in names or stem.startswith(COVER_WORDS)
+                    (preferred if named else others).append((size, entry.path))
+        except OSError:
+            pass
+        best = max(preferred or others, default=None)
+        self._level[folder] = best[1] if best else None
+        return self._level[folder]
 
 
 def _src(value, source: str) -> str | None:
@@ -33,9 +88,11 @@ def scan_root(conn: sqlite3.Connection, root: str, progress: Progress | None = N
     """Indexa los archivos nuevos o modificados de `root` y borra los que ya no existen.
     Devuelve cuántos archivos quedaron pendientes de análisis."""
     existing = {
-        r["path"]: (r["mtime"], r["size"])
-        for r in conn.execute("SELECT path, mtime, size FROM samples WHERE root = ?", (root,))
+        r["path"]: (r["mtime"], r["size"], r["cover"])
+        for r in conn.execute("SELECT path, mtime, size, cover FROM samples WHERE root = ?",
+                              (root,))
     }
+    covers = CoverFinder(root)
     seen: set[str] = set()
     changed = 0
     for dirpath, _dirs, filenames in os.walk(root):
@@ -50,9 +107,15 @@ def scan_root(conn: sqlite3.Connection, root: str, progress: Progress | None = N
             except OSError:
                 continue
             seen.add(path)
-            if existing.get(path) == (st.st_mtime, st.st_size):
+            old = existing.get(path)
+            cover = covers.cover_for(dirpath)
+            if old and old[2] != cover:  # portada nueva, cambiada o borrada
+                conn.execute("UPDATE samples SET cover = ? WHERE path = ?", (cover, path))
+            if old and old[:2] == (st.st_mtime, st.st_size):
                 continue
             _index_file(conn, root, path, st)
+            if not old:
+                conn.execute("UPDATE samples SET cover = ? WHERE path = ?", (cover, path))
             changed += 1
             if progress and changed % 200 == 0:
                 conn.commit()

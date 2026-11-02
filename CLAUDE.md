@@ -54,6 +54,10 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
   vuelve a aplicar `user_fields` después de cada upsert y `_apply` saltea los campos `user`
   (relee la fila actual, porque el usuario pudo editar durante el análisis). Un valor `user`
   en NULL significa "vacío a propósito": no se re-estima.
+- Portadas: `scanner.CoverFinder` (cache por carpeta) guarda en `samples.cover` solo la ruta;
+  `scan_root` la actualiza también para archivos sin cambios. En `app.py`, `CoverCache` lee y
+  escala con `QImageReader` en un `QThreadPool` (QImage en el hilo, QPixmap solo en la
+  ventana). Columnas nuevas de `samples` van en `db.ADDED_COLUMNS` (ALTER TABLE al migrar).
 - `app.py`: `LibraryWorker` (escaneo + análisis) y `TaskWorker` (tareas cortas, como chequear o
   aplicar la actualización) corren en QThreads; nunca tocar widgets desde ellos, solo emitir
   señales. El arrastre sale de `SampleModel.mimeData` (URLs de archivo: Ableton las recibe como

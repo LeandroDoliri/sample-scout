@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import html
 import multiprocessing
 import os
 import sqlite3
 import subprocess
 import sys
 import traceback
+from collections import OrderedDict
 
 from PySide6.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
-                            QModelIndex, QObject, QRegularExpression, Qt, QThread, QTimer, QUrl,
-                            Signal)
+                            QModelIndex, QObject, QRegularExpression, QRunnable, QSize, Qt,
+                            QThread, QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
-                           QIcon, QKeySequence, QRegularExpressionValidator)
+                           QIcon, QImage, QImageReader, QKeySequence, QPixmap,
+                           QRegularExpressionValidator)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
                                QCompleter, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
@@ -37,6 +40,7 @@ COLUMNS = [
 ]
 COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 140)
 FAVORITE_COLUMN = 0
+NAME_COLUMN = 1
 RATING_COLUMN = 6
 NUMERIC_FIELDS = ("favorite", "bpm", "rating", "duration")
 KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
@@ -47,16 +51,104 @@ def stars(rating: int) -> str:
     return "★" * rating + "☆" * (5 - rating)
 
 
+class _CoverJob(QRunnable):
+    """Lee y achica una portada fuera del hilo de la ventana (QImage sí se puede usar en otro
+    hilo; QPixmap no)."""
+
+    def __init__(self, path: str, done: Signal) -> None:
+        super().__init__()
+        self.path = path
+        self.done = done
+
+    def run(self) -> None:
+        reader = QImageReader(self.path)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid() and max(size.width(), size.height()) > CoverCache.BIG:
+            reader.setScaledSize(size.scaled(CoverCache.BIG, CoverCache.BIG, Qt.KeepAspectRatio))
+        image = reader.read()
+        thumb = (image.scaled(CoverCache.THUMB, CoverCache.THUMB, Qt.KeepAspectRatio,
+                              Qt.SmoothTransformation) if not image.isNull() else image)
+        self.done.emit(self.path, image, thumb)
+
+
+class CoverCache(QObject):
+    """Portadas ya escaladas, por ruta. `thumb()` y `big()` devuelven lo que haya en cache y,
+    si falta, piden la carga en segundo plano y avisan con `loaded(ruta)` cuando llega."""
+
+    THUMB = 20
+    BIG = 240
+    MAX_BIG = 64  # las grandes ocupan ~200 KB cada una
+    loaded = Signal(str)
+    _done = Signal(str, QImage, QImage)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(2)
+        self._thumbs: dict[str, QPixmap] = {}
+        self._bigs: OrderedDict[str, QPixmap] = OrderedDict()
+        self._pending: set[str] = set()
+        self._done.connect(self._on_done)
+
+    def thumb(self, path: str) -> QPixmap | None:
+        pixmap = self._thumbs.get(path)
+        if pixmap is None:
+            self._request(path)
+        return pixmap if pixmap is not None and not pixmap.isNull() else None
+
+    def big(self, path: str) -> QPixmap | None:
+        pixmap = self._bigs.get(path)
+        if pixmap is None:
+            self._request(path, force=True)
+            return None
+        self._bigs.move_to_end(path)
+        return pixmap if not pixmap.isNull() else None
+
+    def _request(self, path: str, force: bool = False) -> None:
+        # Una portada ya leída (aunque haya fallado) no se vuelve a pedir para la miniatura.
+        if path in self._pending or (path in self._thumbs and not force):
+            return
+        self._pending.add(path)
+        self.pool.start(_CoverJob(path, self._done))
+
+    def _on_done(self, path: str, image: QImage, thumb: QImage) -> None:
+        self._pending.discard(path)
+        self._thumbs[path] = QPixmap.fromImage(thumb)
+        self._bigs[path] = QPixmap.fromImage(image)
+        while len(self._bigs) > self.MAX_BIG:
+            self._bigs.popitem(last=False)
+        self.loaded.emit(path)
+
+
 class SampleModel(QAbstractTableModel):
     """Tabla de samples: cada fila es un dict de `db.search`. Ordena en memoria (los vacíos
     siempre al final, y conserva el orden elegido al recargar) y entrega rutas de archivo al
     arrastrar."""
 
-    def __init__(self) -> None:
+    def __init__(self, covers: CoverCache) -> None:
         super().__init__()
         self.rows: list[dict] = []
         self.sort_by: tuple[int, Qt.SortOrder] | None = None  # None = orden de la consulta
         self._row_of: dict[str, int] = {}
+        self.covers = covers
+        covers.loaded.connect(self._on_cover_loaded)
+        self._blank: QPixmap | None = None  # mismo tamaño que una miniatura, para alinear
+
+    def _on_cover_loaded(self, _path: str) -> None:
+        if self.rows:
+            column = NAME_COLUMN
+            self.dataChanged.emit(self.index(0, column), self.index(len(self.rows) - 1, column),
+                                  [Qt.DecorationRole])
+
+    def _thumbnail(self, row: dict) -> QPixmap:
+        pixmap = self.covers.thumb(row["cover"]) if row["cover"] else None
+        if pixmap is None:
+            if self._blank is None:
+                self._blank = QPixmap(CoverCache.THUMB, CoverCache.THUMB)
+                self._blank.fill(Qt.transparent)
+            pixmap = self._blank
+        return pixmap
 
     def set_rows(self, rows: list[dict]) -> None:
         self.beginResetModel()
@@ -94,6 +186,8 @@ class SampleModel(QAbstractTableModel):
         row = self.rows[index.row()]
         field = COLUMNS[index.column()][0]
         value = row[field]
+        if role == Qt.DecorationRole and field == "name":
+            return self._thumbnail(row)
         if field in ("favorite", "rating"):
             if role == Qt.DisplayRole:
                 if field == "favorite":
@@ -383,6 +477,8 @@ class MainWindow(QMainWindow):
         self.tasks: list[tuple[QThread, TaskWorker]] = []  # referencias vivas mientras corren
         self.update_info: dict = {}
         self._restoring = False  # refresh() restaurando la selección: no reproducir
+        self.covers = CoverCache()
+        self.covers.loaded.connect(self._on_cover_loaded)
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -438,7 +534,7 @@ class MainWindow(QMainWindow):
 
         # Tabla central (va primero: la lista de colecciones necesita saber de dónde vienen
         # las filas que se le arrastran).
-        self.model = SampleModel()
+        self.model = SampleModel(self.covers)
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.horizontalHeader().setSortIndicator(1, Qt.AscendingOrder)  # por nombre
@@ -448,6 +544,7 @@ class MainWindow(QMainWindow):
         self.table.setDragEnabled(True)
         self.table.setDragDropMode(QAbstractItemView.DragOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
+        self.table.setIconSize(QSize(CoverCache.THUMB, CoverCache.THUMB))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(22)
         header = self.table.horizontalHeader()
@@ -550,7 +647,22 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(self.table)
-        splitter.setSizes([270, 1130])
+
+        # Panel de detalle: portada del pack y datos del sample actual.
+        self.detail_cover = QLabel(alignment=Qt.AlignCenter)
+        self.detail_cover.setFixedSize(CoverCache.BIG, CoverCache.BIG)
+        self.detail_cover.setStyleSheet("QLabel { color: #9ca3af; border: 1px solid #e5e7eb; }")
+        self.detail_info = QLabel(wordWrap=True, alignment=Qt.AlignTop | Qt.AlignLeft)
+        self.detail_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail = QWidget()
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.addWidget(self.detail_cover, 0, Qt.AlignHCenter)
+        detail_layout.addWidget(self.detail_info, 1)
+        detail.setMinimumWidth(CoverCache.BIG + 20)
+        splitter.addWidget(detail)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([270, 1130, CoverCache.BIG + 30])
+        self._update_detail()
 
         # Aviso de versión nueva (oculto hasta que el chequeo encuentre una)
         self.banner = QFrame(objectName="updateBanner")
@@ -623,6 +735,42 @@ class MainWindow(QMainWindow):
         total, pending = db.stats(self.conn)
         busy = " — trabajando…" if self.thread else ""
         self.status.setText(f"{len(rows)} de {total} samples · {pending} sin analizar{busy}")
+        self._update_detail()
+
+    def _current_row(self) -> dict | None:
+        index = self.table.currentIndex()
+        return self.model.rows[index.row()] if index.isValid() else None
+
+    def _update_detail(self) -> None:
+        """Muestra la portada y los datos del sample actual en el panel de la derecha."""
+        row = self._current_row()
+        pixmap = self.covers.big(row["cover"]) if row and row["cover"] else None
+        if pixmap:
+            self.detail_cover.setPixmap(pixmap)
+        else:
+            self.detail_cover.clear()
+            self.detail_cover.setText("Sin portada" if row and not row["cover"] else "")
+        if not row:
+            self.detail_info.setText("")
+            return
+        bpm = f"{row['bpm']:g} BPM" if row["bpm"] else None
+        facts = [INSTRUMENT_LABELS.get(row["instrument"], row["instrument"]),
+                 KIND_LABELS.get(row["kind"], row["kind"]), bpm, row["key"]]
+        lines = [f"<b>{html.escape(row['name'])}</b>",
+                 html.escape(" · ".join(f for f in facts if f))]
+        if row["rating"]:
+            lines.append(f"<span style='color:{STAR_COLOR.name()}'>{stars(row['rating'])}</span>")
+        if row["favorite"]:
+            lines.append("★ Favorito")
+        if row["tags"]:
+            lines.append("Tags: " + html.escape(row["tags"]))
+        lines.append(f"<span style='color:#6b7280'>{html.escape(row['folder'])}</span>")
+        self.detail_info.setText("<br>".join(lines))
+
+    def _on_cover_loaded(self, path: str) -> None:
+        row = self._current_row()
+        if row and row["cover"] == path:
+            self._update_detail()
 
     def _select_paths(self, paths: list[str], current: str | None) -> None:
         selection = QItemSelection()
@@ -708,6 +856,7 @@ class MainWindow(QMainWindow):
     def _reload_rows(self, paths: list[str]) -> None:
         """Actualiza esas filas en la tabla sin recargar todo (no salta ni cambia el orden)."""
         self.model.update_rows(db.get_samples(self.conn, paths))
+        self._update_detail()
 
     def toggle_favorite(self, paths: list[str] | None = None) -> None:
         """Marca como favoritos los elegidos; si ya lo eran todos, los desmarca."""
@@ -879,6 +1028,7 @@ class MainWindow(QMainWindow):
 
     # --- Preescucha ---
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        self._update_detail()
         if current.isValid() and self.autoplay.isChecked() and not self._restoring:
             self.play(current.row())
 
