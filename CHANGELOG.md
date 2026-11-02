@@ -8,6 +8,8 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 
 ## [Sin publicar]
 
+## [0.2.0] - 2026-11-02
+
 ### Agregado
 - Favoritos: tecla `F`, clic en la ☆ o clic derecho, y filtro "Solo favoritos".
 - Estrellas de 0 a 5: teclas `0`–`5`, clic en la columna o clic derecho; columna ordenable y
@@ -16,7 +18,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
   o arrastrando filas sobre la colección; un sample puede estar en varias.
 - Historial con los últimos 200 samples escuchados, en orden de escucha.
 - Edición manual de tipo, instrumento, BPM y key de uno o varios samples (`F2`). Lo editado
-  queda con fuente `user`, gana sobre las demás y re-escanear no lo pisa; "Restablecer datos
+  gana sobre lo que detecta la app y volver a escanear no lo pisa; "Restablecer datos
   automáticos" lo deshace.
 - Tags libres: agregar y quitar desde el mismo diálogo, filtro por tag y búsqueda de texto que
   también los encuentra.
@@ -35,19 +37,17 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
   para ir a cada una y filtro "Ocultar duplicados". La app no borra ni mueve archivos.
 
 ### Cambiado
-- La base pasa al esquema 3 (se migra sola, sin perder datos): el 2 guarda los datos del usuario
-  y las portadas; el 3 suma la huella del contenido y la forma de onda. Al abrir una base
-  anterior se calculan en segundo plano para toda la librería, sin re-analizar lo demás. Los datos del usuario se guardan
-  por ruta, aparte del índice, y sobreviven a quitar y volver a agregar una carpeta.
+- La librería se actualiza sola al abrir la versión nueva, sin perder nada ni re-analizar lo
+  ya analizado. La forma de onda y la detección de duplicados se calculan en segundo plano para
+  los samples que ya tenías.
+- Favoritos, estrellas, colecciones, tags y ediciones se guardan aparte del índice y sobreviven
+  a quitar y volver a agregar una carpeta.
 - Al recargar la lista se conservan la selección, la posición y el orden elegido por columna.
 
 ### Documentación
 - README completo: uso, cómo se ordena la librería, actualizaciones, datos, solución de
   problemas, desarrollo y publicación.
-- Docstrings en todas las funciones públicas.
-- `tools/make_test_samples.py` y `tools/fake_release.py` para probar el análisis y la
-  actualización sin publicar.
-- `release.ps1` toma las notas del release de este archivo.
+- Herramientas para probar el análisis y la actualización sin publicar (para desarrollo).
 
 ## [0.1.0] - 2026-11-01
 
