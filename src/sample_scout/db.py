@@ -70,11 +70,23 @@ CREATE TABLE IF NOT EXISTS history (
     played REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_history_played ON history(played);
+
+-- Embeddings de CLAP (sonidos parecidos y búsqueda por descripción). También por ruta, para que
+-- sobrevivan a re-escanear; valen mientras el archivo tenga ese mtime y ese tamaño. `vec` es
+-- float16 (clap.to_blob); b"" = no se pudo leer el audio (no se reintenta hasta que cambie).
+CREATE TABLE IF NOT EXISTS embeddings (
+    path TEXT NOT NULL,
+    model TEXT NOT NULL,
+    mtime REAL,
+    size INTEGER,
+    vec BLOB NOT NULL,
+    PRIMARY KEY (path, model)
+);
 """
 
 # 1 (o 0, sin marcar) = solo `roots` y `samples`, la de 0.1.0; 2 = datos del usuario y portadas;
-# 3 = huella del contenido (duplicados) y forma de onda.
-SCHEMA_VERSION = 3
+# 3 = huella del contenido (duplicados) y forma de onda; 4 = embeddings de CLAP.
+SCHEMA_VERSION = 4
 # Columnas sumadas a `samples` después de crearla: (nombre, tipo)
 ADDED_COLUMNS = (("cover", "TEXT"), ("content_hash", "TEXT"), ("peaks", "BLOB"))
 # Índices sobre columnas de ADDED_COLUMNS: van después del ALTER TABLE.
@@ -231,6 +243,58 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
                 seen.add(row["content_hash"])
         rows = unique
     return rows
+
+
+def embedding_pending(conn: sqlite3.Connection, model: str) -> list[dict]:
+    """Samples sin embedding de ese modelo, o con uno de cuando el archivo era otro (cambió el
+    mtime o el tamaño)."""
+    rows = conn.execute(
+        "SELECT s.path, s.mtime, s.size FROM samples s LEFT JOIN embeddings e "
+        "ON e.path = s.path AND e.model = ? "
+        "WHERE e.path IS NULL OR e.mtime IS NOT s.mtime OR e.size IS NOT s.size "
+        "ORDER BY s.path", (model,))
+    return [dict(r) for r in rows]
+
+
+def save_embeddings(conn: sqlite3.Connection, model: str,
+                    items: list[tuple[str, float, int, bytes]]) -> None:
+    """Guarda (ruta, mtime, tamaño, vec) de cada archivo."""
+    conn.executemany(
+        "INSERT INTO embeddings(path, model, mtime, size, vec) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(path, model) DO UPDATE SET mtime = excluded.mtime, "
+        "size = excluded.size, vec = excluded.vec",
+        [(path, model, mtime, size, vec) for path, mtime, size, vec in items])
+    conn.commit()
+
+
+def load_embeddings(conn: sqlite3.Connection, model: str) -> tuple[list[str], list[bytes]]:
+    """Rutas y vectores vigentes de los samples de la librería (sin los vacíos)."""
+    rows = conn.execute(
+        "SELECT s.path, e.vec FROM samples s JOIN embeddings e ON e.path = s.path "
+        "AND e.model = ? AND e.mtime IS s.mtime AND e.size IS s.size "
+        "WHERE length(e.vec) > 0", (model,)).fetchall()
+    return [r["path"] for r in rows], [r["vec"] for r in rows]
+
+
+def embedding_stats(conn: sqlite3.Connection, model: str) -> tuple[int, int]:
+    """(samples con embedding vigente, total de samples)"""
+    row = conn.execute(
+        "SELECT COUNT(e.path) AS done, COUNT(*) AS total FROM samples s LEFT JOIN embeddings e "
+        "ON e.path = s.path AND e.model = ? AND e.mtime IS s.mtime AND e.size IS s.size",
+        (model,)).fetchone()
+    return row["done"], row["total"]
+
+
+def embedding_version(conn: sqlite3.Connection, model: str) -> tuple:
+    """Cambia cada vez que se guardan o borran embeddings (para saber si recargarlos)."""
+    sql = "SELECT COUNT(*), MAX(rowid), TOTAL(mtime) FROM embeddings WHERE model = ?"
+    return tuple(conn.execute(sql, (model,)).fetchone())
+
+
+def clear_embeddings(conn: sqlite3.Connection, model: str) -> None:
+    """Borra los embeddings de ese modelo (al borrar el modelo)."""
+    conn.execute("DELETE FROM embeddings WHERE model = ?", (model,))
+    conn.commit()
 
 
 def get_samples(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict]:

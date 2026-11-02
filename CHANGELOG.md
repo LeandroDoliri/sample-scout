@@ -8,6 +8,25 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 
 ## [Sin publicar]
 
+### Agregado
+- Funciones de IA opcionales y locales (CLAP de LAION, Apache-2.0): botón **IA** →
+  *Activar funciones de IA…* baja el modelo una vez (~195 MB, con avance, cancelar y
+  reintentos), lo verifica con sha256 y lo guarda en `%LOCALAPPDATA%\SampleScout\models`.
+  Sin el modelo la app anda igual que antes.
+- La app escucha cada sample en segundo plano después del análisis (un solo proceso, ~0,15 s
+  por sample) y guarda una huella de sonido por ruta, que se recalcula solo si el archivo cambia.
+- **Sonidos parecidos** (clic derecho, `Ctrl+P` o el panel de detalle): vista con los 100 más
+  parecidos, que se puede seguir filtrando.
+- **Búsqueda por sonido**: "kick oscuro con punch", "redoblante crujiente"… Traduce sola los
+  términos de producción en español.
+- Desactivar las funciones de IA o borrar el modelo desde el mismo botón.
+
+### Cambiado
+- La base pasa al esquema 4 (tabla de embeddings); las bases anteriores se actualizan solas.
+- Dependencias nuevas: `onnxruntime` y `tokenizers` (las instala la actualización desde la app).
+- La búsqueda de actualizaciones ignora los releases que no son de la app (prerelease o tags
+  que no son `vX.Y.Z`, como el del modelo).
+
 ## [0.2.0] - 2026-11-02
 
 ### Agregado

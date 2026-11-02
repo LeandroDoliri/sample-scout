@@ -69,14 +69,29 @@ def _http_get(url: str, timeout: float):
     return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
 
 
+def _app_version(release: dict) -> str | None:
+    """"0.2.0" si el release es de la app (tag vX.Y.Z, publicado y no prerelease). Los de los
+    modelos de IA (tag `models-…`, ver clap.MODEL_TAG) no lo son."""
+    version = str(release.get("tag_name") or "").lstrip("vV")
+    if release.get("draft") or release.get("prerelease"):
+        return None
+    return version if re.fullmatch(r"\d+(\.\d+)*", version) else None
+
+
 def latest_release() -> dict | None:
-    """El último release publicado, o None si no hay red o la respuesta no sirve."""
+    """El último release de la app, o None si no hay red o la respuesta no sirve. Si el
+    "Latest" de GitHub no es de la app (p. ej. un release de modelos marcado por error), busca
+    el más nuevo de la app en la lista."""
     try:
         with _http_get(f"{UPDATE_API}/releases/latest", timeout=6) as r:
             release = json.load(r)
-        version = release["tag_name"].lstrip("vV")
-        if not re.fullmatch(r"\d+(\.\d+)*", version):
-            return None
+        version = _app_version(release)
+        if not version:
+            with _http_get(f"{UPDATE_API}/releases?per_page=30", timeout=6) as r:
+                releases = [(v, rel) for rel in json.load(r) if (v := _app_version(rel))]
+            if not releases:
+                return None
+            version, release = max(releases, key=lambda e: version_tuple(e[0]))
         asset = next((a for a in release.get("assets") or []
                       if UPDATE_ASSET.match(a.get("name", ""))), None)
         return {"version": version, "notes": release.get("body") or "",

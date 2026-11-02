@@ -69,11 +69,27 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
   aplicar la actualización) corren en QThreads; nunca tocar widgets desde ellos, solo emitir
   señales. El arrastre sale de `SampleModel.mimeData` (URLs de archivo: Ableton las recibe como
   desde el Explorador). Con pythonw los errores van a `%APPDATA%\SampleScout\app.log`.
+- `clap.py` (funciones de IA, opcionales): modelo `clap-general-v1` (LAION `clap-htsat-unfused`
+  en ONNX: audio fp32, texto int8) que se baja a demanda de un release propio
+  (`models-clap-general-v1`, **prerelease**, nunca "Latest") a `%LOCALAPPDATA%\SampleScout\models`
+  (`SAMPLE_SCOUT_MODELS` / `SAMPLE_SCOUT_MODEL_URL` para pruebas). El zip se verifica contra
+  `MODEL_SHA256` (en el código) y cada archivo contra su manifest. onnxruntime y tokenizers se
+  importan adentro de las funciones; nada de torch ni transformers en la app. El mel está portado
+  de `ClapFeatureExtractor` y `tests/test_clap.py` lo compara con `fixtures/clap_reference.npz`.
+  `scanner.embed_pending` corre después de `analyze_pending` en **un** proceso
+  (`ProcessPoolExecutor(max_workers=1)`, lotes de `clap.BATCH`, núcleos − 2 hilos) y guarda en
+  `embeddings` (por ruta + modelo, float16, válido mientras coincidan mtime y tamaño; `b""` =
+  audio ilegible). La ventana carga los vectores en `clap.Index` (float32, fuerza bruta) y el
+  encoder de texto recién al buscar por sonido. Un modelo nuevo = otro `MODEL_ID` y otro tag.
+- `run_task(fn, on_done, on_failed)`: on_done/on_failed tienen que ser **métodos** de la ventana
+  (así Qt los corre en su hilo); una función anidada correría en el hilo del worker.
 - Multiprocessing en Windows usa spawn: todo lo que se manda a los procesos tiene que ser
   picklable y estar a nivel de módulo (`_analyze_job`).
 
 ## Instalador y actualización (mismo esquema que music-downloader)
 
+- El modelo de IA no va en el instalador ni en `APP_FILES`; se publica aparte (README, "Publicar
+  el modelo de IA") con `tools/build_clap_model.py`.
 - `VERSION` (raíz) es la única fuente de la versión: la leen `sample_scout/__init__.py`
   (`APP_DIR` = carpeta de la instalación o raíz del repo), `pyproject.toml` (dinámica) y
   `build_installer.ps1`.

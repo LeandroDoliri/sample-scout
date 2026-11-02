@@ -9,6 +9,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import traceback
 from collections import OrderedDict
 
@@ -23,12 +24,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QCompleter, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QSpinBox, QSplitter, QStyledItemDelegate,
-                               QTableView, QToolBar, QVBoxLayout, QWidget)
+                               QProgressDialog, QPushButton, QSpinBox, QSplitter,
+                               QStyledItemDelegate, QTableView, QToolBar, QToolButton,
+                               QVBoxLayout, QWidget)
 
-from sample_scout import APP_DIR, __version__, db, scanner, updater
+from sample_scout import APP_DIR, __version__, clap, db, scanner, updater
 from sample_scout.analyzer import NOTES
 from sample_scout.parser import INSTRUMENT_LABELS
+
+MODEL_MB = 195  # tamaño del zip del modelo de IA (tools/build_clap_model.py)
 
 # Igual que el AppUserModelID de los accesos directos del instalador: así la ventana y el
 # acceso directo son la misma app en la barra de tareas
@@ -54,6 +58,10 @@ WAVE_COLOR = QColor("#9ca3af")
 WAVE_PLAYED_COLOR = QColor("#0f766e")
 GROUP_SHADE = QColor(15, 118, 110, 22)  # fondo de un grupo sí y otro no en "Duplicados"
 PEAKS_ROLE = Qt.UserRole + 1
+# "Sonidos parecidos" y búsqueda por sonido: cuántos se muestran (los mejores que pasan
+# los filtros)
+SIMILAR_RESULTS = 100
+SOUND_RESULTS = 100
 
 
 def stars(rating: int) -> str:
@@ -344,6 +352,8 @@ class SampleModel(QAbstractTableModel):
                 tip += f"\nDuplicado: {row['copies']} copias en la librería"
             if row["error"]:
                 tip += f"\nError: {row['error']}"
+            if row.get("score") is not None:
+                tip += f"\nParecido: {row['score']:.0%}"
             return tip
         if role == Qt.TextAlignmentRole and field in ("bpm", "duration"):
             return int(Qt.AlignRight | Qt.AlignVCenter)
@@ -540,19 +550,26 @@ class EditDialog(QDialog):
 
 
 class LibraryWorker(QObject):
-    """Escanea y analiza en segundo plano para no congelar la ventana."""
+    """Escanea, analiza y (con las funciones de IA activadas) calcula los embeddings de CLAP en
+    segundo plano para no congelar la ventana."""
 
     progress = Signal(str)
     indexed = Signal()
     finished = Signal()
 
-    def __init__(self, roots: list[str]) -> None:
+    def __init__(self, roots: list[str], model_dir: str | None = None) -> None:
         super().__init__()
         self.roots = roots
+        self.model_dir = model_dir  # None: sin IA
         self._stop = False
+        self._stop_ai = False
 
     def stop(self) -> None:
         self._stop = True
+
+    def stop_ai(self) -> None:
+        """Frena solo los embeddings (al desactivar la IA); el análisis sigue."""
+        self._stop_ai = True
 
     def run(self) -> None:
         conn = db.connect()
@@ -563,6 +580,14 @@ class LibraryWorker(QObject):
             self.indexed.emit()
             if not self._stop:
                 scanner.analyze_pending(conn, self.progress.emit, lambda: self._stop)
+            if not self._stop and self.model_dir and not self._stop_ai:
+                try:
+                    scanner.embed_pending(conn, self.model_dir, clap.MODEL_ID,
+                                          self.progress.emit,
+                                          lambda: self._stop or self._stop_ai)
+                except Exception:  # p. ej. sin memoria: la app sigue, sin los que faltan
+                    traceback.print_exc()
+                    self.progress.emit("IA: no se pudieron calcular los embeddings")
         finally:
             conn.close()
             self.finished.emit()
@@ -591,6 +616,7 @@ class MainWindow(QMainWindow):
     nuevo o modificado) y consulta en segundo plano si hay una versión nueva."""
 
     _wave_done = Signal(str, object)  # ruta, picos (de _WaveJob)
+    _download_progress = Signal(object, object)  # bajado, total (bytes) del modelo de IA
 
     def __init__(self) -> None:
         super().__init__()
@@ -608,6 +634,20 @@ class MainWindow(QMainWindow):
         self.wave_pool.setMaxThreadCount(1)
         self._wave_pending: set[str] = set()
         self._wave_done.connect(self._on_wave_done)
+
+        # Funciones de IA (clap.py): apagadas si el modelo no está o el usuario las desactivó.
+        self.ai_installed = clap.is_installed()
+        self._ai_index: clap.Index | None = None
+        self._ai_index_key = None
+        self.text_encoder: clap.TextEncoder | None = None
+        self.similar: dict | None = None  # vista "Parecidos a…": {"path", "name", "scores"}
+        self.sound_scores: dict[str, float] | None = None  # resultado de la búsqueda por sonido
+        self._sound_seq = 0  # descarta resultados de búsquedas viejas
+        self._download_cancel = False
+        self._download_dialog: QProgressDialog | None = None
+        self._download_progress.connect(self._on_download_progress)
+        self._text_lock = threading.Lock()  # el modelo de texto se carga una sola vez
+        self._rescan_for_ai = False  # IA activada con un escaneo en curso: otro al terminar
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -660,11 +700,27 @@ class MainWindow(QMainWindow):
         rescan_action.triggered.connect(self.start_scan)
         toolbar.addAction(rescan_action)
         toolbar.addSeparator()
-        self.search = QLineEdit(placeholderText="Buscar (nombre, carpeta, pack, tags…)",
-                                clearButtonEnabled=True)
+        self.search_mode = QComboBox()
+        self.search_mode.addItem("Por nombre", "name")
+        self.search_mode.addItem("Por sonido (IA)", "sound")
+        self.search_mode.setToolTip("Por nombre busca en la ruta y los tags. Por sonido busca "
+                                    "lo que describís («kick oscuro con punch») escuchando los "
+                                    "samples.")
+        self.search_mode.currentIndexChanged.connect(self._on_search_mode)
+        toolbar.addWidget(self.search_mode)
+        self.search = QLineEdit(clearButtonEnabled=True)
         self.search.setMaximumWidth(420)
-        self.search.textChanged.connect(self._schedule_refresh)
+        self.search.textChanged.connect(self._on_search_text)
         toolbar.addWidget(self.search)
+        self.sound_timer = QTimer(self, singleShot=True, interval=500)
+        self.sound_timer.timeout.connect(self._search_by_sound)
+        toolbar.addSeparator()
+        self.ai_button = QToolButton(text="IA", popupMode=QToolButton.InstantPopup)
+        self.ai_button.setToolTip("Funciones de IA: sonidos parecidos y búsqueda por sonido")
+        self.ai_menu = QMenu(self)
+        self.ai_menu.aboutToShow.connect(self._fill_ai_menu)
+        self.ai_button.setMenu(self.ai_menu)
+        toolbar.addWidget(self.ai_button)
 
         # Tabla central (va primero: la lista de colecciones necesita saber de dónde vienen
         # las filas que se le arrastran).
@@ -706,6 +762,7 @@ class MainWindow(QMainWindow):
             return action
 
         shortcut("Reproducir / detener", Qt.Key_Space, self.toggle_play)
+        self.similar_action = shortcut("Sonidos parecidos", "Ctrl+P", self.show_similar_current)
         self.favorite_action = shortcut("Favorito", Qt.Key_F, self.toggle_favorite)
         self.edit_action = shortcut("Editar datos y tags…", Qt.Key_F2, self.edit_selected)
         self.remove_from_collection_action = shortcut(
@@ -851,13 +908,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
+        self._update_ai_widgets()
 
     def _schedule_refresh(self, *_args) -> None:
         self.search_timer.start()
 
     # --- Datos ---
     def current_view(self) -> tuple[str, int | None]:
-        """("all", None), ("history", None), ("duplicates", None) o ("collection", id)."""
+        """("all", None), ("history", None), ("duplicates", None), ("similar", None) o
+        ("collection", id)."""
         item = self.views.currentItem()
         return item.data(Qt.UserRole) if item else ("all", None)
 
@@ -867,9 +926,10 @@ class MainWindow(QMainWindow):
         self._refresh_sidebar()
         item = self.instruments.currentItem()
         view, view_id = self.current_view()
+        ranking = self._ranking()
         rows = db.search(
             self.conn,
-            text=self.search.text(),
+            text=self.search.text() if self._search_mode() == "name" else "",
             instrument=item.data(Qt.UserRole) if item else None,
             kind=self.kind.currentData(),
             bpm_min=self.bpm_min.value() or None,
@@ -884,7 +944,13 @@ class MainWindow(QMainWindow):
             duration_max=self.duration_max.value() or None,
             duplicates=view == "duplicates",
             hide_duplicates=self.hide_duplicates.isChecked() and view != "duplicates",
+            limit=10 ** 9 if ranking is not None else 20000,  # el ranking corta después
         )
+        if ranking is not None:
+            scores, top = ranking
+            rows = [dict(r, score=scores[r["path"]]) for r in rows if r["path"] in scores]
+            rows.sort(key=lambda r: -r["score"])
+            rows = rows[:top]
         selected = self.selected_paths()
         current = self.table.currentIndex()
         current_path = self.model.rows[current.row()]["path"] if current.isValid() else None
@@ -899,7 +965,12 @@ class MainWindow(QMainWindow):
             self._restoring = False
         total, pending = db.stats(self.conn)
         busy = " — trabajando…" if self.thread else ""
-        self.status.setText(f"{len(rows)} de {total} samples · {pending} sin analizar{busy}")
+        text = f"{len(rows)} de {total} samples · {pending} sin analizar"
+        if self.ai_enabled():
+            done, _total = db.embedding_stats(self.conn, clap.MODEL_ID)
+            if done < total:
+                text += f" · IA: {done}/{total} escuchados"
+        self.status.setText(text + busy)
         self._update_detail()
 
     def _current_row(self) -> dict | None:
@@ -940,6 +1011,10 @@ class MainWindow(QMainWindow):
         if row["tags"]:
             lines.append("Tags: " + html.escape(row["tags"]))
         lines.append(f"<span style='color:#6b7280'>{html.escape(row['folder'])}</span>")
+        if row.get("score") is not None:
+            lines.append(f"Parecido: {row['score']:.0%}")
+        if self.ai_enabled():
+            lines.append("<a href='similar'>≈ Sonidos parecidos</a>")
         if row["copies"] > 1:
             self._detail_links = db.copies_of(self.conn, row["path"])
             lines.append(f"<br><b>Duplicado</b> ({row['copies']} copias). También está en:")
@@ -948,7 +1023,9 @@ class MainWindow(QMainWindow):
         self.detail_info.setText("<br>".join(lines))
 
     def _on_detail_link(self, link: str) -> None:
-        if link.startswith("copy:"):
+        if link == "similar":
+            self.show_similar_current()
+        elif link.startswith("copy:"):
             i = int(link[5:])
             if i < len(self._detail_links):
                 self.go_to(self._detail_links[i])
@@ -958,6 +1035,7 @@ class MainWindow(QMainWindow):
         "Duplicados" sin filtros (ahí están todas las copias)."""
         if self.model.row_of(path) is None:
             self._clear_filters()
+            self.similar = None
             for i in range(self.views.count()):
                 if self.views.item(i).data(Qt.UserRole) == ("duplicates", None):
                     self.views.blockSignals(True)
@@ -1075,6 +1153,9 @@ class MainWindow(QMainWindow):
         entries = [("Toda la librería", ("all", None), total),
                    ("Historial", ("history", None), db.history_count(self.conn)),
                    ("Duplicados", ("duplicates", None), db.duplicate_count(self.conn))]
+        if self.similar:
+            entries.append((f"≈ Parecidos a {self.similar['name']}", ("similar", None),
+                            min(SIMILAR_RESULTS, len(self.similar["scores"]))))
         entries += [(f"▸ {c['name']}", ("collection", c["id"]), c["n"])
                     for c in db.list_collections(self.conn)]
         self.views.blockSignals(True)
@@ -1124,9 +1205,13 @@ class MainWindow(QMainWindow):
         self.roots.addItems(db.list_roots(self.conn))
 
     def _on_view_changed(self, *_args) -> None:
-        # El historial va en orden de escucha y los duplicados agrupados: sin orden por columna.
-        if self.current_view()[0] in ("history", "duplicates"):
+        # El historial va en orden de escucha, los duplicados agrupados y los parecidos del más
+        # al menos parecido: sin orden por columna.
+        view = self.current_view()[0]
+        if view in ("history", "duplicates", "similar"):
             self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        if view != "similar" and self.similar:
+            self.similar = None  # al salir de la vista se descarta
         self._schedule_refresh()
 
     # --- Datos del usuario: favoritos, estrellas, colecciones, edición ---
@@ -1294,7 +1379,7 @@ class MainWindow(QMainWindow):
         if not roots:
             return
         self.thread = QThread(self)
-        self.worker = LibraryWorker(roots)
+        self.worker = LibraryWorker(roots, str(clap.model_dir()) if self.ai_enabled() else None)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.statusBar().showMessage)
@@ -1309,6 +1394,276 @@ class MainWindow(QMainWindow):
         self.thread = self.worker = None
         self.statusBar().clearMessage()
         self.refresh()
+        if self._rescan_for_ai:
+            self._rescan_for_ai = False
+            if self.ai_enabled():
+                self.start_scan()
+
+    # --- Funciones de IA ---
+    def ai_enabled(self) -> bool:
+        """El modelo está instalado y el usuario no apagó las funciones de IA."""
+        return self.ai_installed and self._settings().value("ai/enabled", True, type=bool)
+
+    def _update_ai_widgets(self) -> None:
+        on = self.ai_enabled()
+        item = self.search_mode.model().item(1)
+        item.setEnabled(on)
+        if not on and self._search_mode() == "sound":
+            self.search_mode.setCurrentIndex(0)
+        self.similar_action.setEnabled(on)
+        self.ai_button.setText("IA ✓" if on else "IA")
+        self.search.setPlaceholderText(
+            "Describí el sonido: kick oscuro con punch, pad cálido…"
+            if self._search_mode() == "sound" else "Buscar (nombre, carpeta, pack, tags…)")
+
+    def _fill_ai_menu(self) -> None:
+        menu = self.ai_menu
+        menu.clear()
+        if not self.ai_installed:
+            menu.addAction("Activar funciones de IA…", self.activate_ai)
+            return
+        toggle = menu.addAction("Funciones de IA activadas")
+        toggle.setCheckable(True)
+        toggle.setChecked(self.ai_enabled())
+        toggle.toggled.connect(self.set_ai_enabled)
+        done, total = db.embedding_stats(self.conn, clap.MODEL_ID)
+        info = menu.addAction(f"{done} de {total} samples escuchados")
+        info.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Borrar el modelo…", self.delete_model)
+
+    def activate_ai(self, ask: bool = True) -> None:
+        """Baja el modelo (con progreso y cancelación), lo verifica y prende las funciones."""
+        if self._download_dialog:
+            return
+        if ask:
+            answer = QMessageBox.question(
+                self, "Activar funciones de IA",
+                "Sample Scout puede escuchar tu librería para encontrar sonidos parecidos y "
+                "buscar por descripción («kick oscuro con punch»). Todo corre en tu PC.\n\n"
+                f"Hace falta bajar una vez el modelo (unos {MODEL_MB} MB). Se guarda en\n"
+                f"{clap.model_dir()}\n\n"
+                "Después, la app escucha cada sample en segundo plano (unos 25 minutos cada "
+                "10.000 samples). ¿Bajarlo ahora?")
+            if answer != QMessageBox.Yes:
+                return
+        self._download_cancel = False
+        dialog = QProgressDialog("Bajando el modelo de IA…", "Cancelar", 0, 1000, self)
+        dialog.setWindowTitle("Activar funciones de IA")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(self._cancel_download)
+        dialog.show()
+        self._download_dialog = dialog
+
+        def task(log):
+            return clap.install(progress=self._download_progress.emit,
+                                should_stop=lambda: self._download_cancel, log=log)
+
+        self.run_task(task, self._on_model_installed, self._on_model_failed)
+
+    def _cancel_download(self) -> None:
+        self._download_cancel = True
+        if self._download_dialog:
+            self._download_dialog.setLabelText("Cancelando…")
+
+    def _on_download_progress(self, done, total) -> None:
+        dialog = self._download_dialog
+        if dialog and total:
+            dialog.setValue(int(done * 1000 / total))
+            dialog.setLabelText(f"Bajando el modelo de IA… {done / 1e6:.0f} de "
+                                f"{total / 1e6:.0f} MB")
+
+    def _close_download_dialog(self) -> None:
+        if self._download_dialog:
+            self._download_dialog.canceled.disconnect(self._cancel_download)
+            self._download_dialog.close()
+            self._download_dialog.deleteLater()
+            self._download_dialog = None
+        self.statusBar().clearMessage()
+
+    def _on_model_installed(self, _folder) -> None:
+        self._close_download_dialog()
+        self.ai_installed = True
+        self._settings().setValue("ai/enabled", True)
+        self._update_ai_widgets()
+        self.statusBar().showMessage("Funciones de IA activadas: la app va a escuchar tu "
+                                     "librería en segundo plano.", 8000)
+        self._start_ai_scan()
+
+    def _on_model_failed(self, exc: Exception) -> None:
+        self._close_download_dialog()
+        if isinstance(exc, clap.Cancelled):
+            self.statusBar().showMessage("Descarga del modelo cancelada.", 5000)
+            return
+        answer = QMessageBox.warning(
+            self, "No se pudo bajar el modelo", f"No se pudo activar la IA: {exc}.\n\n"
+            "La app sigue andando igual, sin las funciones de IA.",
+            QMessageBox.Retry | QMessageBox.Cancel)
+        if answer == QMessageBox.Retry:
+            self.activate_ai(ask=False)
+
+    def _start_ai_scan(self) -> None:
+        """Calcula los embeddings que falten: ahora, o al terminar el escaneo en curso."""
+        if self.thread:
+            self._rescan_for_ai = True
+        else:
+            self.start_scan()
+
+    def set_ai_enabled(self, on: bool) -> None:
+        self._settings().setValue("ai/enabled", on)
+        if on:
+            self._start_ai_scan()
+        else:
+            if self.worker:
+                self.worker.stop_ai()
+            self._leave_ai_views()
+        self._update_ai_widgets()
+        self.refresh()
+
+    def _leave_ai_views(self) -> None:
+        self.sound_scores = None
+        if self.similar:
+            self.similar = None
+            self.views.setCurrentRow(0)
+
+    def delete_model(self) -> None:
+        answer = QMessageBox.question(
+            self, "Borrar el modelo",
+            f"¿Borrar el modelo de IA de {clap.model_dir()} y lo que la app escuchó de tus "
+            "samples? Tus samples y tus datos no se tocan; podés volver a activarla cuando "
+            "quieras (se vuelve a bajar).")
+        if answer != QMessageBox.Yes:
+            return
+        if self.thread:  # el proceso de embeddings tiene el modelo abierto
+            self.worker.stop()
+            self.statusBar().showMessage("Deteniendo el análisis…")
+            self.thread.quit()
+            self.thread.wait(30000)
+        with self._text_lock:
+            self.text_encoder = None
+        clap.remove()
+        db.clear_embeddings(self.conn, clap.MODEL_ID)
+        self.ai_installed = clap.is_installed()
+        self._ai_index = None
+        self._leave_ai_views()
+        self._update_ai_widgets()
+        self.refresh()
+        if clap.model_dir().exists():
+            QMessageBox.warning(self, "Borrar el modelo", "No se pudo borrar todo: cerrá Sample "
+                                f"Scout y borrá a mano la carpeta {clap.model_dir()}.")
+        else:
+            self.statusBar().showMessage("Modelo de IA borrado.", 5000)
+
+    def ai_index(self) -> clap.Index:
+        """Los embeddings de la librería en memoria; se recargan si cambiaron en la base."""
+        key = (db.embedding_version(self.conn, clap.MODEL_ID), db.stats(self.conn)[0])
+        if self._ai_index is None or key != self._ai_index_key:
+            self._ai_index = clap.Index(*db.load_embeddings(self.conn, clap.MODEL_ID))
+            self._ai_index_key = key
+        return self._ai_index
+
+    def show_similar_current(self) -> None:
+        row = self._current_row()
+        if row:
+            self.show_similar(row["path"])
+
+    def show_similar(self, path: str) -> None:
+        """Vista "Parecidos a…": los SIMILAR_RESULTS más parecidos que pasan los filtros, del
+        más al menos parecido."""
+        if not self.ai_enabled():
+            return
+        index = self.ai_index()
+        if path not in index:
+            self.statusBar().showMessage("La app todavía no escuchó este sample: probá en un "
+                                         "rato.", 5000)
+            return
+        name = os.path.basename(path)
+        self.similar = {"path": path, "name": name, "scores": index.similar(path, len(index))}
+        # La búsqueda por texto se limpia para que no esconda resultados; los demás filtros
+        # siguen valiendo.
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.sound_scores = None
+        self._refresh_sidebar()
+        for i in range(self.views.count()):
+            if self.views.item(i).data(Qt.UserRole) == ("similar", None):
+                self.views.blockSignals(True)
+                self.views.setCurrentRow(i)
+                self.views.blockSignals(False)
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self.refresh()
+        self.search_timer.stop()
+        self.statusBar().showMessage(f"Sonidos parecidos a {name}", 5000)
+
+    def _search_mode(self) -> str:
+        return self.search_mode.currentData() or "name"
+
+    def _ranking(self) -> tuple[dict[str, float], int] | None:
+        """(puntaje por ruta, cuántos mostrar) si la lista va ordenada por parecido."""
+        if self.current_view()[0] == "similar" and self.similar:
+            return self.similar["scores"], SIMILAR_RESULTS
+        if self._search_mode() == "sound" and self.sound_scores is not None:
+            return self.sound_scores, SOUND_RESULTS
+        return None
+
+    def _on_search_mode(self, *_args) -> None:
+        if self._search_mode() == "sound" and not self.ai_enabled():
+            self.search_mode.setCurrentIndex(0)
+            return
+        self.sound_scores = None
+        self._update_ai_widgets()
+        if self._search_mode() == "sound":
+            self._search_by_sound()
+        else:
+            self._schedule_refresh()
+
+    def _on_search_text(self, *_args) -> None:
+        if self._search_mode() == "sound":
+            self.sound_timer.start()
+        else:
+            self._schedule_refresh()
+
+    def _search_by_sound(self) -> None:
+        """Codifica el texto (traducido al inglés) en otro hilo y ordena la lista por parecido."""
+        query = self.search.text().strip()
+        self._sound_seq += 1
+        if not query or not self.ai_enabled():
+            self.sound_scores = None
+            self.refresh()
+            return
+        seq = self._sound_seq
+        english = clap.translate(query)
+
+        def task(log):
+            with self._text_lock:
+                if self.text_encoder is None:
+                    log("Cargando el modelo de texto…")
+                    self.text_encoder = clap.TextEncoder()
+                encoder = self.text_encoder
+            log(f"Buscando por sonido: {english}")
+            return seq, encoder.embed([english])[0]
+
+        # Métodos y no funciones anidadas: así Qt los corre en el hilo de la ventana.
+        self.run_task(task, self._on_sound_done, self._on_sound_failed)
+
+    def _on_sound_done(self, result) -> None:
+        seq, vec = result
+        if seq != self._sound_seq or self._search_mode() != "sound":
+            return  # llegó tarde: ya se escribió otra cosa
+        first = self.sound_scores is None
+        index = self.ai_index()
+        self.sound_scores = index.scores(vec, len(index))
+        if first:
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self.statusBar().clearMessage()
+        self.refresh()
+
+    def _on_sound_failed(self, exc: Exception) -> None:
+        self.statusBar().showMessage(f"No se pudo buscar por sonido: {exc}", 6000)
 
     # --- Preescucha ---
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
@@ -1365,6 +1720,11 @@ class MainWindow(QMainWindow):
         if self.current_view()[0] == "collection":
             menu.addAction(self.remove_from_collection_action)
 
+        if self.ai_enabled():
+            menu.addSeparator()
+            similar = menu.addAction("≈ Sonidos parecidos",
+                                     lambda: self.show_similar(path))
+            similar.setShortcut(self.similar_action.shortcut())
         menu.addSeparator()
         menu.addAction(self.edit_action)
         if any(r[f"{f}_source"] == "user" for r in rows for f in db.EDITABLE_FIELDS):
@@ -1508,6 +1868,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_columns()
+        self._download_cancel = True  # una descarga del modelo a medias se corta y se borra
+        for thread, _worker in list(self.tasks):
+            thread.wait(5000)
         if self.worker:
             self.worker.stop()
             self.thread.quit()
