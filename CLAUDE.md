@@ -65,6 +65,12 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
   también toma las filas analizadas con `peaks` NULL (bases viejas) y solo les calcula eso.
   Si falla, `peaks` queda en `b""` para no reintentar. La ventana pide la onda en un
   `QThreadPool` si el análisis todavía no llegó (`db.set_peaks` no pisa una existente).
+- Modo Carpetas: `folders.build_tree` (sin Qt, testeado) arma el árbol desde
+  `db.folder_counts` (GROUP BY `root, folder`, con el índice `idx_samples_folder`), nunca desde
+  el disco; la portada va en la carpeta donde está la imagen. `db.search(folder=(root, folder),
+  subfolders=...)` filtra con `substr` (no LIKE: `_`/`%` en nombres). En `app.py`, `FolderModel`
+  (QAbstractItemModel sobre esos nodos) se rearma solo cuando cambia la librería
+  (`_folders_dirty`: escaneo, agregar o quitar carpeta) y si el modo Carpetas está a la vista.
 - `app.py`: `LibraryWorker` (escaneo + análisis) y `TaskWorker` (tareas cortas, como chequear o
   aplicar la actualización) corren en QThreads; nunca tocar widgets desde ellos, solo emitir
   señales. El arrastre sale de `SampleModel.mimeData` (URLs de archivo: Ableton las recibe como

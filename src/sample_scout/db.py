@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE INDEX IF NOT EXISTS idx_samples_root ON samples(root);
 CREATE INDEX IF NOT EXISTS idx_samples_instrument ON samples(instrument);
 CREATE INDEX IF NOT EXISTS idx_samples_analyzed ON samples(analyzed);
+-- Vista Carpetas: arma el árbol agrupando por carpeta y filtra por carpeta (folders.py).
+CREATE INDEX IF NOT EXISTS idx_samples_folder ON samples(root, folder);
 
 -- Datos del usuario: van aparte y por ruta, así sobreviven a re-escanear y a quitar y volver
 -- a agregar una carpeta (las filas de `samples` se borran y se regeneran; estas no).
@@ -85,8 +87,9 @@ CREATE TABLE IF NOT EXISTS embeddings (
 """
 
 # 1 (o 0, sin marcar) = solo `roots` y `samples`, la de 0.1.0; 2 = datos del usuario y portadas;
-# 3 = huella del contenido (duplicados) y forma de onda; 4 = embeddings de CLAP.
-SCHEMA_VERSION = 4
+# 3 = huella del contenido (duplicados) y forma de onda; 4 = embeddings de CLAP; 5 = índice por
+# carpeta (vista Carpetas).
+SCHEMA_VERSION = 5
 # Columnas sumadas a `samples` después de crearla: (nombre, tipo)
 ADDED_COLUMNS = (("cover", "TEXT"), ("content_hash", "TEXT"), ("peaks", "BLOB"))
 # Índices sobre columnas de ADDED_COLUMNS: van después del ALTER TABLE.
@@ -167,6 +170,7 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
            tag: str | None = None, collection: int | None = None, history: bool = False,
            duration_min: float | None = None, duration_max: float | None = None,
            duplicates: bool = False, hide_duplicates: bool = False,
+           folder: tuple[str, str] | None = None, subfolders: bool = True,
            limit: int = 20000) -> list[dict]:
     """Samples que cumplen todos los filtros, ordenados por nombre. `text` busca cada palabra en
     la ruta completa (nombre, carpetas, pack) y en los tags. `instrument="__none__"` trae los
@@ -174,7 +178,9 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
     escuchados, del más reciente al más viejo. `duration_*` van en segundos. Con `duplicates`
     solo vienen los archivos repetidos, agrupados por contenido (cada grupo junto, por nombre);
     `hide_duplicates` deja uno por grupo: el primero en el orden de la consulta entre los que
-    pasan los demás filtros. Los filtros en None (o 0) no filtran.
+    pasan los demás filtros. `folder` es (raíz, carpeta relativa a la raíz, "." para la raíz
+    misma), como `samples.root` / `samples.folder`: trae los de esa carpeta y, con `subfolders`,
+    también los de todas sus subcarpetas. Los filtros en None (o 0) no filtran.
     Cada fila trae además `favorite`, `rating`, `tags` (separados por coma) y `copies` (cuántos
     archivos de la librería tienen el mismo contenido, él incluido; 0 si todavía no se sabe)."""
     where: list[str] = []
@@ -205,6 +211,10 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
         params.append(duration_max)
     if duplicates:
         where.append(f"s.content_hash IN ({DUPLICATE_HASHES})")
+    if folder:
+        clause, folder_params = _folder_clause(*folder, subfolders)
+        where.append(clause)
+        params += folder_params
     if key:
         where.append("s.key = ?")
         params.append(key)
@@ -243,6 +253,35 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
                 seen.add(row["content_hash"])
         rows = unique
     return rows
+
+
+def _folder_clause(root: str, folder: str, subfolders: bool) -> tuple[str, list]:
+    """Condición SQL para "los samples de esa carpeta" (ver `search`). Compara con substr y no
+    con LIKE: los nombres de carpeta suelen tener `_` y `%`, y LIKE no distingue mayúsculas."""
+    if folder in ("", "."):
+        return ("s.root = ?", [root]) if subfolders else ("s.root = ? AND s.folder = '.'", [root])
+    if not subfolders:
+        return "s.root = ? AND s.folder = ?", [root, folder]
+    prefix = folder + os.sep
+    return ("s.root = ? AND (s.folder = ? OR substr(s.folder, 1, ?) = ?)",
+            [root, folder, len(prefix), prefix])
+
+
+def folder_counts(conn: sqlite3.Connection) -> list[dict]:
+    """Cada carpeta con samples directos: root, folder (relativa, "." = la raíz), n (archivos
+    directamente ahí) y cover (la portada que tienen; es la misma para toda la carpeta). Con
+    esto se arma el árbol de la vista Carpetas sin recorrer el disco (folders.build_tree)."""
+    rows = conn.execute("SELECT root, folder, COUNT(*) AS n, MAX(cover) AS cover FROM samples "
+                        "GROUP BY root, folder")
+    return [dict(r) for r in rows]
+
+
+def folder_paths(conn: sqlite3.Connection, root: str, folder: str,
+                 subfolders: bool = True) -> list[str]:
+    """Rutas de los samples de una carpeta (para agregarla entera a una colección)."""
+    clause, params = _folder_clause(root, folder, subfolders)
+    rows = conn.execute(f"SELECT s.path FROM samples s WHERE {clause} ORDER BY s.path", params)
+    return [r["path"] for r in rows]
 
 
 def embedding_pending(conn: sqlite3.Connection, model: str) -> list[dict]:

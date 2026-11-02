@@ -56,7 +56,7 @@ def test_migra_base_del_esquema_3(tmp_path):
     old.close()
 
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     [row] = db.search(conn)
     assert (row["bpm"], row["favorite"], row["rating"]) == (120, 1, 3)
     assert db.embedding_pending(conn, clap.MODEL_ID) == [
