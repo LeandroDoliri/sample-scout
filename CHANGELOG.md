@@ -8,6 +8,8 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 
 ## [Sin publicar]
 
+## [0.3.0] - 2026-11-02
+
 ### Agregado
 - Funciones de IA opcionales y locales (CLAP de LAION, Apache-2.0): botón **IA** →
   *Activar funciones de IA…* baja el modelo una vez (~195 MB, con avance, cancelar y
