@@ -16,15 +16,15 @@ from PySide6.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionM
                             QModelIndex, QObject, QRegularExpression, QRunnable, QSettings, QSize,
                             Qt, QThread, QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
-                           QIcon, QImage, QImageReader, QKeySequence, QPixmap,
+                           QIcon, QImage, QImageReader, QKeySequence, QPainter, QPixmap,
                            QRegularExpressionValidator)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QCompleter, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QCompleter, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QSpinBox, QSplitter, QTableView, QToolBar,
-                               QVBoxLayout, QWidget)
+                               QPushButton, QSpinBox, QSplitter, QStyledItemDelegate,
+                               QTableView, QToolBar, QVBoxLayout, QWidget)
 
 from sample_scout import APP_DIR, __version__, db, scanner, updater
 from sample_scout.analyzer import NOTES
@@ -37,20 +37,123 @@ APP_USER_MODEL_ID = "LeandroDoliri.SampleScout"
 COLUMNS = [
     ("favorite", "★"), ("name", "Nombre"), ("instrument", "Instrumento"), ("kind", "Tipo"),
     ("bpm", "BPM"), ("key", "Key"), ("rating", "Estrellas"), ("duration", "Duración"),
-    ("tags", "Tags"), ("folder", "Carpeta"),
+    ("wave", "Onda"), ("tags", "Tags"), ("folder", "Carpeta"),
 ]
-COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 140, 200)
+COLUMN_WIDTHS = (28, 320, 100, 80, 60, 60, 80, 80, 90, 140, 200)
 FAVORITE_COLUMN = 0
 NAME_COLUMN = 1
 RATING_COLUMN = 6
 NUMERIC_FIELDS = ("favorite", "bpm", "rating", "duration")
+UNSORTABLE_FIELDS = ("wave",)
+DEFAULT_HIDDEN = ("wave",)  # columnas opcionales: arrancan ocultas
 KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
-COLUMN_MENU_LABELS = {"favorite": "Favorito"}  # en el menú de columnas, "★" solo no se entiende
+# En el menú de columnas, "★" u "Onda" solos no se entienden.
+COLUMN_MENU_LABELS = {"favorite": "Favorito", "wave": "Forma de onda (mini)"}
 STAR_COLOR = QColor("#d4a017")
+WAVE_COLOR = QColor("#9ca3af")
+WAVE_PLAYED_COLOR = QColor("#0f766e")
+GROUP_SHADE = QColor(15, 118, 110, 22)  # fondo de un grupo sí y otro no en "Duplicados"
+PEAKS_ROLE = Qt.UserRole + 1
 
 
 def stars(rating: int) -> str:
     return "★" * rating + "☆" * (5 - rating)
+
+
+def paint_peaks(painter: QPainter, rect, peaks: bytes, color: QColor,
+                played_color: QColor | None = None, progress: float | None = None) -> None:
+    """Dibuja la forma de onda (simétrica, una línea por píxel) dentro de `rect`. Con
+    `progress` (0 a 1) lo ya reproducido va en `played_color`."""
+    width, height = rect.width(), rect.height()
+    if not peaks or width <= 0 or height <= 0:
+        return
+    middle = rect.top() + height / 2
+    n = len(peaks)
+    played_x = rect.left() + progress * width if progress is not None else None
+    painter.save()
+    for x in range(width):
+        lo = x * n // width
+        hi = max(lo + 1, (x + 1) * n // width)
+        half = max(0.5, max(peaks[lo:hi]) / 255 * (height / 2 - 1))
+        px = rect.left() + x
+        played = played_x is not None and px <= played_x
+        painter.setPen(played_color if played and played_color else color)
+        painter.drawLine(px, int(middle - half), px, int(middle + half))
+    painter.restore()
+
+
+class WaveformView(QWidget):
+    """Forma de onda grande del panel de detalle, con el cursor de reproducción. Un clic emite
+    `seek` con la posición (0 a 1) para reproducir desde ahí."""
+
+    seek = Signal(float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.peaks = b""
+        self.text = ""
+        self.progress: float | None = None
+        self.setFixedHeight(64)
+
+    def set_peaks(self, peaks: bytes | None, text: str = "") -> None:
+        self.peaks = peaks or b""
+        self.text = "" if self.peaks else text
+        self.setCursor(Qt.PointingHandCursor if self.peaks else Qt.ArrowCursor)
+        self.setToolTip("Clic para reproducir desde ese punto" if self.peaks else "")
+        self.update()
+
+    def set_progress(self, progress: float | None) -> None:
+        if progress != self.progress:
+            self.progress = progress
+            self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setPen(QColor("#e5e7eb"))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        if not self.peaks:
+            painter.setPen(WAVE_COLOR)
+            painter.drawText(self.rect(), Qt.AlignCenter, self.text)
+            return
+        rect = self.rect().adjusted(1, 3, -1, -3)
+        paint_peaks(painter, rect, self.peaks, WAVE_COLOR, WAVE_PLAYED_COLOR, self.progress)
+        if self.progress is not None:
+            x = int(rect.left() + self.progress * rect.width())
+            painter.setPen(QColor("#111827"))
+            painter.drawLine(x, 0, x, self.height())
+
+    def mousePressEvent(self, event) -> None:
+        if self.peaks and event.button() == Qt.LeftButton and self.width() > 0:
+            self.seek.emit(min(1.0, max(0.0, event.position().x() / self.width())))
+
+
+class WaveDelegate(QStyledItemDelegate):
+    """Mini forma de onda de la columna opcional "Onda"."""
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)  # fondo y selección
+        peaks = index.data(PEAKS_ROLE)
+        if peaks:
+            paint_peaks(painter, option.rect.adjusted(3, 3, -3, -3), peaks, WAVE_COLOR)
+
+
+class _WaveJob(QRunnable):
+    """Calcula la forma de onda de un sample que todavía no la tiene (el análisis no llegó a
+    ese archivo), fuera del hilo de la ventana."""
+
+    def __init__(self, path: str, done: Signal) -> None:
+        super().__init__()
+        self.path = path
+        self.done = done
+
+    def run(self) -> None:
+        from sample_scout.analyzer import waveform_peaks
+
+        try:
+            peaks = waveform_peaks(self.path)
+        except Exception:
+            peaks = b""
+        self.done.emit(self.path, peaks)
 
 
 class _CoverJob(QRunnable):
@@ -136,6 +239,8 @@ class SampleModel(QAbstractTableModel):
         self.covers = covers
         covers.loaded.connect(self._on_cover_loaded)
         self._blank: QPixmap | None = None  # mismo tamaño que una miniatura, para alinear
+        self.grouped = False  # vista "Duplicados": sombrea un grupo de copias sí y otro no
+        self._shaded: set[int] = set()
 
     def _on_cover_loaded(self, _path: str) -> None:
         if self.rows:
@@ -172,6 +277,14 @@ class SampleModel(QAbstractTableModel):
 
     def _reindex(self) -> None:
         self._row_of = {r["path"]: i for i, r in enumerate(self.rows)}
+        self._shaded = set()
+        if self.grouped:
+            shade, last = True, object()
+            for i, r in enumerate(self.rows):
+                if r["content_hash"] != last:
+                    shade, last = not shade, r["content_hash"]
+                if shade:
+                    self._shaded.add(i)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self.rows)
@@ -190,6 +303,10 @@ class SampleModel(QAbstractTableModel):
         value = row[field]
         if role == Qt.DecorationRole and field == "name":
             return self._thumbnail(row)
+        if role == Qt.BackgroundRole and index.row() in self._shaded:
+            return GROUP_SHADE
+        if field == "wave":
+            return row["peaks"] if role == PEAKS_ROLE else None
         if field in ("favorite", "rating"):
             if role == Qt.DisplayRole:
                 if field == "favorite":
@@ -223,6 +340,8 @@ class SampleModel(QAbstractTableModel):
                 tip += "\nFuente → " + ", ".join(sources)
             if row["tags"]:
                 tip += f"\nTags: {row['tags']}"
+            if row["copies"] > 1:
+                tip += f"\nDuplicado: {row['copies']} copias en la librería"
             if row["error"]:
                 tip += f"\nError: {row['error']}"
             return tip
@@ -244,6 +363,8 @@ class SampleModel(QAbstractTableModel):
             return rows
         column, order = self.sort_by
         field = COLUMNS[column][0]
+        if field in UNSORTABLE_FIELDS:
+            return rows
         numeric = field in NUMERIC_FIELDS
         filled = [r for r in rows if r[field] is not None]
         empty = [r for r in rows if r[field] is None]  # siempre al final
@@ -469,6 +590,8 @@ class MainWindow(QMainWindow):
     """Ventana principal. Al abrir: muestra la librería, re-escanea las carpetas (solo procesa lo
     nuevo o modificado) y consulta en segundo plano si hay una versión nueva."""
 
+    _wave_done = Signal(str, object)  # ruta, picos (de _WaveJob)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Sample Scout {__version__}")
@@ -481,11 +604,20 @@ class MainWindow(QMainWindow):
         self._restoring = False  # refresh() restaurando la selección: no reproducir
         self.covers = CoverCache()
         self.covers.loaded.connect(self._on_cover_loaded)
+        self.wave_pool = QThreadPool(self)
+        self.wave_pool.setMaxThreadCount(1)
+        self._wave_pending: set[str] = set()
+        self._wave_done.connect(self._on_wave_done)
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.audio.setVolume(0.8)
         self.player.setAudioOutput(self.audio)
+        self._pending_seek: float | None = None  # posición a aplicar cuando cargue el archivo
+        self.player.mediaStatusChanged.connect(self._on_media_status)
+        self.player.playbackStateChanged.connect(self._on_playback_state)
+        self.playhead_timer = QTimer(self, interval=40)
+        self.playhead_timer.timeout.connect(self._update_playhead)
 
         self._build_ui()
         self.search_timer = QTimer(self, singleShot=True, interval=200)
@@ -547,6 +679,8 @@ class MainWindow(QMainWindow):
         self.table.setDragDropMode(QAbstractItemView.DragOnly)
         self.table.setDefaultDropAction(Qt.CopyAction)
         self.table.setIconSize(QSize(CoverCache.THUMB, CoverCache.THUMB))
+        self.table.setItemDelegateForColumn(COLUMNS.index(("wave", "Onda")),
+                                            WaveDelegate(self.table))
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(22)
         header = self.table.horizontalHeader()
@@ -602,6 +736,12 @@ class MainWindow(QMainWindow):
         self.bpm_max = QSpinBox(minimum=0, maximum=300, specialValueText="—")
         for spin in (self.bpm_min, self.bpm_max):
             spin.valueChanged.connect(self._schedule_refresh)
+        self.duration_min = QDoubleSpinBox(minimum=0, maximum=600, decimals=1, singleStep=0.5,
+                                           suffix=" s", specialValueText="—")
+        self.duration_max = QDoubleSpinBox(minimum=0, maximum=600, decimals=1, singleStep=0.5,
+                                           suffix=" s", specialValueText="—")
+        for spin in (self.duration_min, self.duration_max):
+            spin.valueChanged.connect(self._schedule_refresh)
         self.key = QComboBox()
         self.key.addItem("Todas", None)
         for note in NOTES:
@@ -618,6 +758,9 @@ class MainWindow(QMainWindow):
         self.tag.currentIndexChanged.connect(self._schedule_refresh)
         self.favorites_only = QCheckBox("Solo favoritos")
         self.favorites_only.toggled.connect(self._schedule_refresh)
+        self.hide_duplicates = QCheckBox("Ocultar duplicados")
+        self.hide_duplicates.setToolTip("Muestra un solo archivo de cada grupo de copias")
+        self.hide_duplicates.toggled.connect(self._schedule_refresh)
         self.autoplay = QCheckBox("Escuchar al seleccionar", checked=True)
 
         filters = QFormLayout()
@@ -627,10 +770,16 @@ class MainWindow(QMainWindow):
         bpm_row.addWidget(QLabel("a"))
         bpm_row.addWidget(self.bpm_max)
         filters.addRow("BPM", bpm_row)
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(self.duration_min)
+        duration_row.addWidget(QLabel("a"))
+        duration_row.addWidget(self.duration_max)
+        filters.addRow("Duración", duration_row)
         filters.addRow("Key", self.key)
         filters.addRow("Estrellas", self.min_rating)
         filters.addRow("Tag", self.tag)
         filters.addRow("", self.favorites_only)
+        filters.addRow("", self.hide_duplicates)
 
         self.roots = QListWidget()
         self.roots.setMaximumHeight(120)
@@ -658,11 +807,16 @@ class MainWindow(QMainWindow):
         self.detail_cover = QLabel(alignment=Qt.AlignCenter)
         self.detail_cover.setFixedSize(CoverCache.BIG, CoverCache.BIG)
         self.detail_cover.setStyleSheet("QLabel { color: #9ca3af; border: 1px solid #e5e7eb; }")
+        self.detail_wave = WaveformView()
+        self.detail_wave.seek.connect(self._on_wave_seek)
         self.detail_info = QLabel(wordWrap=True, alignment=Qt.AlignTop | Qt.AlignLeft)
-        self.detail_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.detail_info.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.detail_info.linkActivated.connect(self._on_detail_link)
+        self._detail_links: list[str] = []  # copias que se listan en el detalle
         detail = QWidget()
         detail_layout = QVBoxLayout(detail)
         detail_layout.addWidget(self.detail_cover, 0, Qt.AlignHCenter)
+        detail_layout.addWidget(self.detail_wave)
         detail_layout.addWidget(self.detail_info, 1)
         detail.setMinimumWidth(CoverCache.BIG + 20)
         splitter.addWidget(detail)
@@ -703,7 +857,7 @@ class MainWindow(QMainWindow):
 
     # --- Datos ---
     def current_view(self) -> tuple[str, int | None]:
-        """("all", None), ("history", None) o ("collection", id)."""
+        """("all", None), ("history", None), ("duplicates", None) o ("collection", id)."""
         item = self.views.currentItem()
         return item.data(Qt.UserRole) if item else ("all", None)
 
@@ -726,6 +880,10 @@ class MainWindow(QMainWindow):
             tag=self.tag.currentData(),
             collection=view_id if view == "collection" else None,
             history=view == "history",
+            duration_min=self.duration_min.value() or None,
+            duration_max=self.duration_max.value() or None,
+            duplicates=view == "duplicates",
+            hide_duplicates=self.hide_duplicates.isChecked() and view != "duplicates",
         )
         selected = self.selected_paths()
         current = self.table.currentIndex()
@@ -733,6 +891,7 @@ class MainWindow(QMainWindow):
         scroll = self.table.verticalScrollBar().value()
         self._restoring = True
         try:
+            self.model.grouped = view == "duplicates"
             self.model.set_rows(rows)
             self._select_paths(selected, current_path)
             self.table.verticalScrollBar().setValue(scroll)
@@ -756,12 +915,22 @@ class MainWindow(QMainWindow):
         else:
             self.detail_cover.clear()
             self.detail_cover.setText("Sin portada" if row and not row["cover"] else "")
+        self._detail_links = []
         if not row:
+            self.detail_wave.set_peaks(None)
             self.detail_info.setText("")
+            self._update_playhead()
             return
+        if row["peaks"] is None:
+            self.detail_wave.set_peaks(None, "Calculando la forma de onda…")
+            self._request_wave(row["path"])
+        else:
+            self.detail_wave.set_peaks(row["peaks"], "Sin forma de onda")
+        self._update_playhead()
         bpm = f"{row['bpm']:g} BPM" if row["bpm"] else None
+        duration = f"{row['duration']:.2f} s" if row["duration"] else None
         facts = [INSTRUMENT_LABELS.get(row["instrument"], row["instrument"]),
-                 KIND_LABELS.get(row["kind"], row["kind"]), bpm, row["key"]]
+                 KIND_LABELS.get(row["kind"], row["kind"]), bpm, row["key"], duration]
         lines = [f"<b>{html.escape(row['name'])}</b>",
                  html.escape(" · ".join(f for f in facts if f))]
         if row["rating"]:
@@ -771,7 +940,115 @@ class MainWindow(QMainWindow):
         if row["tags"]:
             lines.append("Tags: " + html.escape(row["tags"]))
         lines.append(f"<span style='color:#6b7280'>{html.escape(row['folder'])}</span>")
+        if row["copies"] > 1:
+            self._detail_links = db.copies_of(self.conn, row["path"])
+            lines.append(f"<br><b>Duplicado</b> ({row['copies']} copias). También está en:")
+            for i, path in enumerate(self._detail_links):
+                lines.append(f"<a href='copy:{i}'>{html.escape(path)}</a>")
         self.detail_info.setText("<br>".join(lines))
+
+    def _on_detail_link(self, link: str) -> None:
+        if link.startswith("copy:"):
+            i = int(link[5:])
+            if i < len(self._detail_links):
+                self.go_to(self._detail_links[i])
+
+    def go_to(self, path: str) -> None:
+        """Selecciona ese sample en la lista. Si los filtros lo ocultan, pasa a la vista
+        "Duplicados" sin filtros (ahí están todas las copias)."""
+        if self.model.row_of(path) is None:
+            self._clear_filters()
+            for i in range(self.views.count()):
+                if self.views.item(i).data(Qt.UserRole) == ("duplicates", None):
+                    self.views.blockSignals(True)
+                    self.views.setCurrentRow(i)
+                    self.views.blockSignals(False)
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+            self.refresh()
+            self.search_timer.stop()
+        row = self.model.row_of(path)
+        if row is None:
+            self.statusBar().showMessage("Ese archivo ya no está en la librería.", 4000)
+            return
+        index = self.model.index(row, NAME_COLUMN)
+        self.table.setCurrentIndex(index)  # selecciona y, si corresponde, reproduce
+        self.table.scrollTo(index, QAbstractItemView.PositionAtCenter)
+        self.table.setFocus()
+
+    def _clear_filters(self) -> None:
+        for widget in (self.search, self.instruments, self.kind, self.bpm_min, self.bpm_max,
+                       self.duration_min, self.duration_max, self.key, self.min_rating,
+                       self.tag, self.favorites_only, self.hide_duplicates):
+            widget.blockSignals(True)
+        self.search.clear()
+        self.instruments.setCurrentRow(0)
+        for combo in (self.kind, self.key, self.min_rating, self.tag):
+            combo.setCurrentIndex(0)
+        for spin in (self.bpm_min, self.bpm_max, self.duration_min, self.duration_max):
+            spin.setValue(0)
+        self.favorites_only.setChecked(False)
+        self.hide_duplicates.setChecked(False)
+        for widget in (self.search, self.instruments, self.kind, self.bpm_min, self.bpm_max,
+                       self.duration_min, self.duration_max, self.key, self.min_rating,
+                       self.tag, self.favorites_only, self.hide_duplicates):
+            widget.blockSignals(False)
+
+    # --- Forma de onda ---
+    def _request_wave(self, path: str) -> None:
+        if path not in self._wave_pending:
+            self._wave_pending.add(path)
+            self.wave_pool.start(_WaveJob(path, self._wave_done))
+
+    def _on_wave_done(self, path: str, peaks: bytes) -> None:
+        self._wave_pending.discard(path)
+        db.set_peaks(self.conn, path, peaks)
+        self.model.update_rows(db.get_samples(self.conn, [path]))
+        row = self._current_row()
+        if row and row["path"] == path:
+            self._update_detail()
+
+    def _playing_current(self) -> bool:
+        """Si el reproductor tiene cargado el sample actual de la lista."""
+        row = self._current_row()
+        source = self.player.source().toLocalFile()
+        return bool(row and source and os.path.normcase(os.path.normpath(source))
+                    == os.path.normcase(row["path"]))
+
+    def _update_playhead(self) -> None:
+        duration = self.player.duration()
+        if (self._playing_current() and duration > 0
+                and self.player.playbackState() != QMediaPlayer.StoppedState):
+            self.detail_wave.set_progress(min(1.0, self.player.position() / duration))
+        else:
+            self.detail_wave.set_progress(None)
+
+    def _on_playback_state(self, state) -> None:
+        if state == QMediaPlayer.PlayingState:
+            self.playhead_timer.start()
+        else:
+            self.playhead_timer.stop()
+        self._update_playhead()
+
+    def _on_wave_seek(self, fraction: float) -> None:
+        """Clic sobre la onda: salta a ese punto (o empieza a reproducir desde ahí)."""
+        index = self.table.currentIndex()
+        if not index.isValid():
+            return
+        if (self._playing_current() and self.player.duration() > 0
+                and self.player.playbackState() == QMediaPlayer.PlayingState):
+            self.player.setPosition(int(fraction * self.player.duration()))
+        else:
+            self.play(index.row(), start=fraction)
+
+    def _on_media_status(self, status) -> None:
+        if self._pending_seek is None:
+            return
+        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            fraction, self._pending_seek = self._pending_seek, None
+            self.player.setPosition(int(fraction * self.player.duration()))
+            self.player.play()
+        elif status == QMediaPlayer.InvalidMedia:
+            self._pending_seek = None
 
     def _on_cover_loaded(self, path: str) -> None:
         row = self._current_row()
@@ -796,7 +1073,8 @@ class MainWindow(QMainWindow):
         selected_view = self.current_view()
         total, _pending = db.stats(self.conn)
         entries = [("Toda la librería", ("all", None), total),
-                   ("Historial", ("history", None), db.history_count(self.conn))]
+                   ("Historial", ("history", None), db.history_count(self.conn)),
+                   ("Duplicados", ("duplicates", None), db.duplicate_count(self.conn))]
         entries += [(f"▸ {c['name']}", ("collection", c["id"]), c["n"])
                     for c in db.list_collections(self.conn)]
         self.views.blockSignals(True)
@@ -846,8 +1124,8 @@ class MainWindow(QMainWindow):
         self.roots.addItems(db.list_roots(self.conn))
 
     def _on_view_changed(self, *_args) -> None:
-        # El historial se muestra en orden de escucha: se saca el orden por columna.
-        if self.current_view()[0] == "history":
+        # El historial va en orden de escucha y los duplicados agrupados: sin orden por columna.
+        if self.current_view()[0] in ("history", "duplicates"):
             self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
         self._schedule_refresh()
 
@@ -1038,13 +1316,23 @@ class MainWindow(QMainWindow):
         if current.isValid() and self.autoplay.isChecked() and not self._restoring:
             self.play(current.row())
 
-    def play(self, row: int) -> None:
-        """Reproduce la fila y la anota en el historial (la lista no se recarga, para no
-        reordenar el historial mientras se lo recorre)."""
+    def play(self, row: int, start: float | None = None) -> None:
+        """Reproduce la fila (desde `start`, de 0 a 1, si se pasa) y la anota en el historial
+        (la lista no se recarga, para no reordenar el historial mientras se lo recorre)."""
         path = self.model.rows[row]["path"]
+        url = QUrl.fromLocalFile(path)
         self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.play()
+        self._pending_seek = None
+        if self.player.source() != url:
+            self.player.setSource(url)
+        if start is None:
+            self.player.play()
+        elif (self.player.duration() > 0 and self.player.mediaStatus() in (
+                QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia, QMediaPlayer.EndOfMedia)):
+            self.player.setPosition(int(start * self.player.duration()))
+            self.player.play()
+        else:  # todavía cargando: se salta al punto en _on_media_status
+            self._pending_seek = start
         db.add_history(self.conn, path)
 
     def toggle_play(self) -> None:
@@ -1081,6 +1369,12 @@ class MainWindow(QMainWindow):
         menu.addAction(self.edit_action)
         if any(r[f"{f}_source"] == "user" for r in rows for f in db.EDITABLE_FIELDS):
             menu.addAction("Restablecer datos automáticos", self.reset_selected)
+        copies = db.copies_of(self.conn, path) if self.model.rows[index.row()]["copies"] > 1 \
+            else []
+        if copies:
+            copies_menu = menu.addMenu(f"Ir a otra copia ({len(copies)})")
+            for copy in copies:
+                copies_menu.addAction(copy, lambda copy=copy: self.go_to(copy))
         menu.addSeparator()
         menu.addAction("Mostrar en el Explorador",
                        lambda: subprocess.Popen(["explorer", "/select,", path]))
@@ -1173,13 +1467,14 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         for i in range(len(COLUMNS)):
             header.moveSection(header.visualIndex(i), i)
-            header.setSectionHidden(i, False)
+            header.setSectionHidden(i, COLUMNS[i][0] in DEFAULT_HIDDEN)
             header.resizeSection(i, COLUMN_WIDTHS[i])
         self._settings().remove("columns")
 
     def _save_columns(self) -> None:
         """Guarda por nombre de campo (no con header.saveState()): si una versión nueva suma
-        columnas, el estado viejo sigue sirviendo y las nuevas aparecen a la vista."""
+        columnas, el estado viejo sigue sirviendo y las nuevas aparecen a la vista (salvo las de
+        DEFAULT_HIDDEN, que son opcionales)."""
         header = self.table.horizontalHeader()
         state = {field: {"pos": header.visualIndex(i), "hidden": header.isSectionHidden(i),
                          "width": header.sectionSize(i) or COLUMN_WIDTHS[i]}
@@ -1204,7 +1499,7 @@ class MainWindow(QMainWindow):
             i = fields.index(field)
             header.moveSection(header.visualIndex(i), pos)
             saved = state.get(field, {})
-            header.setSectionHidden(i, bool(saved.get("hidden")))
+            header.setSectionHidden(i, bool(saved.get("hidden", field in DEFAULT_HIDDEN)))
             width = saved.get("width")
             if isinstance(width, int) and width >= 20:
                 header.resizeSection(i, width)

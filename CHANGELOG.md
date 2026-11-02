@@ -26,9 +26,18 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 - Columnas a elección: clic derecho en el encabezado para mostrar u ocultar cada una o
   restablecerlas, y arrastre para reordenarlas. Visibilidad, orden y ancho se recuerdan entre
   aperturas; las columnas que sume una versión nueva aparecen a la vista.
+- Forma de onda del sample elegido en el panel de detalle, con el cursor de reproducción; clic
+  sobre la onda para reproducir desde ese punto. Se calcula una vez y queda guardada.
+- Columna opcional "Onda" (mini forma de onda por fila), oculta de entrada.
+- Filtro por duración (rango en segundos) en el panel izquierdo.
+- Duplicados: vista "Duplicados" en el panel "Biblioteca" con los archivos repetidos agrupados
+  (aunque estén en otras carpetas o con otro nombre), lista de copias en el panel de detalle
+  para ir a cada una y filtro "Ocultar duplicados". La app no borra ni mueve archivos.
 
 ### Cambiado
-- La base pasa al esquema 2 (se migra sola, sin perder datos). Los datos del usuario se guardan
+- La base pasa al esquema 3 (se migra sola, sin perder datos): el 2 guarda los datos del usuario
+  y las portadas; el 3 suma la huella del contenido y la forma de onda. Al abrir una base
+  anterior se calculan en segundo plano para toda la librería, sin re-analizar lo demás. Los datos del usuario se guardan
   por ruta, aparte del índice, y sobreviven a quitar y volver a agregar una carpeta.
 - Al recargar la lista se conservan la selección, la posición y el orden elegido por columna.
 
