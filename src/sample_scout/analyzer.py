@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import struct
+
 import numpy as np
 
 SR = 22050
@@ -13,6 +16,10 @@ MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.
 MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 KEY_MIN_CORRELATION = 0.6
 STRONG_ONSET = 1.5
+WAVE_POINTS = 240  # columnas de la forma de onda guardada (un byte cada una)
+# Chunks que definen el sonido; el resto (acid, LIST, bext, smpl, ID3…) es metadata.
+AUDIO_CHUNKS = {b"WAVE": (b"fmt ", b"data"), b"AIFF": (b"COMM", b"SSND"),
+                b"AIFC": (b"COMM", b"SSND")}
 
 
 def duration_of(path: str) -> float:
@@ -25,6 +32,78 @@ def duration_of(path: str) -> float:
         import librosa
 
         return float(librosa.get_duration(path=path))
+
+
+def _audio_chunks(f) -> list[tuple[int, int]] | None:
+    """(posición, tamaño) de los chunks de audio de un WAV o AIFF, o None si no lo es."""
+    header = f.read(12)
+    if len(header) < 12 or header[:4] not in (b"RIFF", b"FORM"):
+        return None
+    wanted = AUDIO_CHUNKS.get(header[8:12])
+    if not wanted:
+        return None
+    endian = "<" if header[:4] == b"RIFF" else ">"
+    found = {}
+    while True:
+        chunk = f.read(8)
+        if len(chunk) < 8:
+            break
+        chunk_id, size = chunk[:4], struct.unpack(endian + "I", chunk[4:])[0]
+        if chunk_id in wanted:
+            found[chunk_id] = (f.tell(), size)
+        f.seek(size + (size & 1), 1)
+    return [found[c] for c in wanted] if len(found) == len(wanted) else None
+
+
+def content_hash(path: str) -> str:
+    """Huella del contenido para encontrar duplicados. En WAV y AIFF es solo del formato y las
+    muestras de audio, así que dos copias con distinto nombre, carpeta o metadata (tempo de
+    Ableton, tags, fechas) dan igual. En los demás formatos es del archivo entero."""
+    digest = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as f:
+        chunks = _audio_chunks(f)
+        if chunks is None:
+            f.seek(0)
+            chunks = [(0, -1)]
+        for start, size in chunks:
+            f.seek(start)
+            remaining = size
+            while remaining:
+                block = f.read(1 << 20 if remaining < 0 else min(1 << 20, remaining))
+                if not block:
+                    break
+                digest.update(block)
+                if remaining > 0:
+                    remaining -= len(block)
+    return digest.hexdigest()
+
+
+def waveform_peaks(path: str, points: int = WAVE_POINTS) -> bytes:
+    """Forma de onda chica para dibujar: el pico absoluto de cada uno de `points` tramos del
+    archivo entero, normalizado al pico del archivo, de 0 a 255 (un byte por tramo)."""
+    import soundfile as sf
+
+    peaks = np.zeros(points)
+    try:
+        frames = sf.info(path).frames
+        pos = 0
+        for block in sf.blocks(path, blocksize=1 << 16, always_2d=True):
+            level = np.abs(block).max(axis=1)
+            buckets = (np.arange(pos, pos + len(level)) * points // max(frames, 1)).clip(
+                0, points - 1)
+            np.maximum.at(peaks, buckets, level)
+            pos += len(level)
+    except Exception:  # formatos que soundfile no lee: con librosa, a baja resolución
+        import librosa
+
+        y, _sr = librosa.load(path, sr=8000, mono=True)
+        if y.size:
+            buckets = np.arange(y.size) * points // y.size
+            np.maximum.at(peaks, buckets, np.abs(y))
+    top = peaks.max()
+    if top > 0:
+        peaks = peaks / top * 255
+    return np.round(peaks).astype(np.uint8).tobytes()
 
 
 def guess_kind(duration: float, onset_count: int) -> str:

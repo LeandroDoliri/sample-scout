@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS samples (
     instrument_source TEXT,
     analyzed INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    cover TEXT  -- ruta de la portada del pack (ver scanner.CoverFinder)
+    cover TEXT,  -- ruta de la portada del pack (ver scanner.CoverFinder)
+    content_hash TEXT,  -- huella del audio para encontrar duplicados (analyzer.content_hash)
+    peaks BLOB  -- forma de onda: WAVE_POINTS bytes de 0 a 255 (analyzer.waveform_peaks)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_root ON samples(root);
 CREATE INDEX IF NOT EXISTS idx_samples_instrument ON samples(instrument);
@@ -70,9 +72,13 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS idx_history_played ON history(played);
 """
 
-SCHEMA_VERSION = 2  # 1 (o 0, sin marcar) = solo `roots` y `samples`, la de 0.1.0
+# 1 (o 0, sin marcar) = solo `roots` y `samples`, la de 0.1.0; 2 = datos del usuario y portadas;
+# 3 = huella del contenido (duplicados) y forma de onda.
+SCHEMA_VERSION = 3
 # Columnas sumadas a `samples` después de crearla: (nombre, tipo)
-ADDED_COLUMNS = (("cover", "TEXT"),)
+ADDED_COLUMNS = (("cover", "TEXT"), ("content_hash", "TEXT"), ("peaks", "BLOB"))
+# Índices sobre columnas de ADDED_COLUMNS: van después del ALTER TABLE.
+ADDED_INDEXES = "CREATE INDEX IF NOT EXISTS idx_samples_hash ON samples(content_hash);"
 EDITABLE_FIELDS = ("kind", "bpm", "key", "instrument")
 HISTORY_SIZE = 200
 
@@ -104,6 +110,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     for name, kind in ADDED_COLUMNS:
         if name not in columns:
             conn.execute(f"ALTER TABLE samples ADD COLUMN {name} {kind}")
+    conn.executescript(ADDED_INDEXES)
     if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
@@ -131,8 +138,14 @@ def remove_root(conn: sqlite3.Connection, path: str) -> None:
 SELECT_SAMPLES = """
 SELECT s.*, COALESCE(m.favorite, 0) AS favorite, COALESCE(m.rating, 0) AS rating,
        (SELECT group_concat(tag, ', ') FROM (SELECT tag FROM tags t WHERE t.path = s.path
-                                             ORDER BY tag COLLATE NOCASE)) AS tags
+                                             ORDER BY tag COLLATE NOCASE)) AS tags,
+       (SELECT COUNT(*) FROM samples d WHERE d.content_hash = s.content_hash) AS copies
 FROM samples s LEFT JOIN marks m ON m.path = s.path
+"""
+# Huellas con más de un archivo en la librería.
+DUPLICATE_HASHES = """
+SELECT content_hash FROM samples WHERE content_hash IS NOT NULL
+GROUP BY content_hash HAVING COUNT(*) > 1
 """
 
 
@@ -140,12 +153,18 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
            kind: str | None = None, bpm_min: float | None = None, bpm_max: float | None = None,
            key: str | None = None, favorites: bool = False, min_rating: int = 0,
            tag: str | None = None, collection: int | None = None, history: bool = False,
+           duration_min: float | None = None, duration_max: float | None = None,
+           duplicates: bool = False, hide_duplicates: bool = False,
            limit: int = 20000) -> list[dict]:
     """Samples que cumplen todos los filtros, ordenados por nombre. `text` busca cada palabra en
     la ruta completa (nombre, carpetas, pack) y en los tags. `instrument="__none__"` trae los
     sin clasificar. `collection` es el id de una colección; con `history` solo vienen los
-    escuchados, del más reciente al más viejo. Los filtros en None (o 0) no filtran.
-    Cada fila trae además `favorite`, `rating` y `tags` (separados por coma)."""
+    escuchados, del más reciente al más viejo. `duration_*` van en segundos. Con `duplicates`
+    solo vienen los archivos repetidos, agrupados por contenido (cada grupo junto, por nombre);
+    `hide_duplicates` deja uno por grupo: el primero en el orden de la consulta entre los que
+    pasan los demás filtros. Los filtros en None (o 0) no filtran.
+    Cada fila trae además `favorite`, `rating`, `tags` (separados por coma) y `copies` (cuántos
+    archivos de la librería tienen el mismo contenido, él incluido; 0 si todavía no se sabe)."""
     where: list[str] = []
     params: list = []
     for word in text.lower().split():
@@ -166,6 +185,14 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
     if bpm_max:
         where.append("s.bpm <= ?")
         params.append(bpm_max)
+    if duration_min:
+        where.append("s.duration >= ?")
+        params.append(duration_min)
+    if duration_max:
+        where.append("s.duration <= ?")
+        params.append(duration_max)
+    if duplicates:
+        where.append(f"s.content_hash IN ({DUPLICATE_HASHES})")
     if key:
         where.append("s.key = ?")
         params.append(key)
@@ -186,9 +213,24 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
         sql += " JOIN history h ON h.path = s.path"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY " + ("h.played DESC" if history else "s.name COLLATE NOCASE") + " LIMIT ?"
+    if history:
+        order = "h.played DESC"
+    elif duplicates:
+        order = "s.content_hash, s.name COLLATE NOCASE, s.path"
+    else:
+        order = "s.name COLLATE NOCASE"
+    sql += f" ORDER BY {order} LIMIT ?"
     params.append(limit)
-    return [dict(r) for r in conn.execute(sql, params)]
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if hide_duplicates:
+        seen: set[str] = set()
+        unique = []
+        for row in rows:
+            if row["content_hash"] is None or row["content_hash"] not in seen:
+                unique.append(row)
+                seen.add(row["content_hash"])
+        rows = unique
+    return rows
 
 
 def get_samples(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict]:
@@ -199,6 +241,27 @@ def get_samples(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict]:
         if row:
             rows[path] = dict(row)
     return rows
+
+
+def duplicate_count(conn: sqlite3.Connection) -> int:
+    """Cuántos archivos tienen al menos una copia en la librería."""
+    return conn.execute(f"SELECT COUNT(*) FROM samples WHERE content_hash IN ({DUPLICATE_HASHES})"
+                        ).fetchone()[0]
+
+
+def copies_of(conn: sqlite3.Connection, path: str) -> list[str]:
+    """Las otras rutas con el mismo contenido que `path` (vacío si no tiene copias)."""
+    rows = conn.execute(
+        "SELECT d.path FROM samples s JOIN samples d ON d.content_hash = s.content_hash "
+        "WHERE s.path = ? AND d.path <> s.path ORDER BY d.path", (path,))
+    return [r["path"] for r in rows]
+
+
+def set_peaks(conn: sqlite3.Connection, path: str, peaks: bytes) -> None:
+    """Guarda la forma de onda calculada fuera del análisis (la pide la ventana al mostrar un
+    sample que todavía no la tiene). No pisa una que ya esté."""
+    conn.execute("UPDATE samples SET peaks = ? WHERE path = ? AND peaks IS NULL", (peaks, path))
+    conn.commit()
 
 
 def instrument_counts(conn: sqlite3.Connection) -> dict[str | None, int]:

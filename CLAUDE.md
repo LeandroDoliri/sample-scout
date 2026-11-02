@@ -57,7 +57,14 @@ el Python x64: usar `C:\temp\...` o `%TEMP%\ss-...` para pruebas.
 - Portadas: `scanner.CoverFinder` (cache por carpeta) guarda en `samples.cover` solo la ruta;
   `scan_root` la actualiza también para archivos sin cambios. En `app.py`, `CoverCache` lee y
   escala con `QImageReader` en un `QThreadPool` (QImage en el hilo, QPixmap solo en la
-  ventana). Columnas nuevas de `samples` van en `db.ADDED_COLUMNS` (ALTER TABLE al migrar).
+  ventana). Columnas nuevas de `samples` van en `db.ADDED_COLUMNS` (ALTER TABLE al migrar;
+  sus índices, en `db.ADDED_INDEXES`).
+- Onda y duplicados: `samples.peaks` (`analyzer.WAVE_POINTS` bytes) y `samples.content_hash`
+  (en WAV/AIFF solo formato + muestras, para que la metadata no cuente) se calculan en
+  `_analyze_job` y `_index_file` los pone en NULL cuando cambia mtime/tamaño. `analyze_pending`
+  también toma las filas analizadas con `peaks` NULL (bases viejas) y solo les calcula eso.
+  Si falla, `peaks` queda en `b""` para no reintentar. La ventana pide la onda en un
+  `QThreadPool` si el análisis todavía no llegó (`db.set_peaks` no pisa una existente).
 - `app.py`: `LibraryWorker` (escaneo + análisis) y `TaskWorker` (tareas cortas, como chequear o
   aplicar la actualización) corren en QThreads; nunca tocar widgets desde ellos, solo emitir
   señales. El arrastre sale de `SampleModel.mimeData` (URLs de archivo: Ableton las recibe como

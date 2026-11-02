@@ -148,7 +148,7 @@ def _index_file(conn: sqlite3.Connection, root: str, path: str, st: os.stat_resu
             bpm = excluded.bpm, bpm_source = excluded.bpm_source,
             key = excluded.key, key_source = excluded.key_source,
             instrument = excluded.instrument, instrument_source = excluded.instrument_source,
-            duration = NULL, analyzed = 0, error = NULL
+            duration = NULL, analyzed = 0, error = NULL, content_hash = NULL, peaks = NULL
         """,
         (
             path, root, Path(path).name, os.path.relpath(os.path.dirname(path), root),
@@ -160,11 +160,32 @@ def _index_file(conn: sqlite3.Connection, root: str, path: str, st: os.stat_resu
     db.apply_user_fields(conn, path)
 
 
+def _fingerprint(path: str) -> dict:
+    """Huella del contenido y forma de onda. Si algo falla queda vacío (b"" en la onda) para
+    no reintentarlo en cada arranque; se recalcula cuando el archivo cambia."""
+    from sample_scout.analyzer import content_hash, waveform_peaks
+
+    out: dict = {}
+    try:
+        out["content_hash"] = content_hash(path)
+    except OSError:
+        pass
+    try:
+        out["peaks"] = waveform_peaks(path)
+    except Exception:
+        out["peaks"] = b""
+    return out
+
+
 def _analyze_job(sample: dict) -> dict:
-    """Corre en un proceso aparte (librosa es pesado y no libera el GIL)."""
+    """Corre en un proceso aparte (librosa es pesado y no libera el GIL). A un sample ya
+    analizado (de una base anterior a la forma de onda) solo le calcula la huella y la onda."""
     from sample_scout.analyzer import analyze
 
     instrument = sample["instrument"]
+    extras = _fingerprint(sample["path"])
+    if sample["analyzed"]:
+        return {"id": sample["id"], "extras": extras}
 
     def need(field: str) -> bool:  # un dato vacío a propósito por el usuario no se estima
         return sample[field] is None and sample[f"{field}_source"] != "user"
@@ -177,12 +198,18 @@ def _analyze_job(sample: dict) -> dict:
             need_instrument=need("instrument"),
             kind_hint=sample["kind"],
         )
-        return {"id": sample["id"], "result": result}
+        return {"id": sample["id"], "result": result, "extras": extras}
     except Exception as exc:  # archivos corruptos o formatos raros
-        return {"id": sample["id"], "error": f"{type(exc).__name__}: {exc}"}
+        return {"id": sample["id"], "error": f"{type(exc).__name__}: {exc}", "extras": extras}
 
 
 def _apply(conn: sqlite3.Connection, sample: dict, job: dict) -> None:
+    extras = job.get("extras", {})
+    if extras:
+        conn.execute("UPDATE samples SET content_hash = ?, peaks = ? WHERE id = ?",
+                     (extras.get("content_hash"), extras.get("peaks"), sample["id"]))
+    if "result" not in job and "error" not in job:  # solo huella y onda
+        return
     if "error" in job:
         conn.execute("UPDATE samples SET analyzed = 1, error = ? WHERE id = ?",
                      (job["error"], sample["id"]))
@@ -217,10 +244,12 @@ def _apply(conn: sqlite3.Connection, sample: dict, job: dict) -> None:
 def analyze_pending(conn: sqlite3.Connection, progress: Progress | None = None,
                     should_stop: Callable[[], bool] = lambda: False,
                     workers: int | None = None) -> int:
-    """Analiza en paralelo (un proceso por núcleo menos uno) todo lo que tenga analyzed = 0 y
-    guarda cada resultado apenas llega. Devuelve cuántos procesó. Un archivo que falla queda
-    analizado con su error en la columna `error`, para no reintentarlo en cada arranque."""
-    pending = [dict(r) for r in conn.execute("SELECT * FROM samples WHERE analyzed = 0")]
+    """Analiza en paralelo (un proceso por núcleo menos uno) todo lo que tenga analyzed = 0 o
+    le falte la forma de onda, y guarda cada resultado apenas llega. Devuelve cuántos procesó.
+    Un archivo que falla queda analizado con su error en la columna `error`, para no
+    reintentarlo en cada arranque."""
+    pending = [dict(r) for r in conn.execute(
+        "SELECT * FROM samples WHERE analyzed = 0 OR peaks IS NULL ORDER BY analyzed")]
     if not pending:
         return 0
     by_id = {s["id"]: s for s in pending}

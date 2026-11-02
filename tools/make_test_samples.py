@@ -12,10 +12,16 @@ Después agregá esa carpeta en la app (o pasala a `--analyze`) y compará con l
     raro/idea nueva.wav          loop      -     Am   -            audio (pad: sin tempo)
     Pack_126_Gm_Bass_Loop.wav    loop      126   Gm   bass         nombre
 
+Además deja duplicados para probar la vista "Duplicados": `copias/Kick copiado.wav` (igual a
+`raro/cosa1.wav`) y `copias/Bass con tempo.wav` (el mismo audio que el bajo, con un chunk `acid`
+agregado, como cuando Ableton guarda el tempo). Tienen que salir dos grupos de dos archivos.
+
 Con `--analyze` además indexa y analiza en una base aparte (<carpeta>/test.db) e imprime el
 resultado, sin tocar tu librería.
 """
 
+import shutil
+import struct
 import sys
 from pathlib import Path
 
@@ -58,6 +64,18 @@ def write_library(lib: Path) -> None:
     # Sample "comercial": todo sale del nombre
     bass = np.sin(2 * np.pi * 98 * np.arange(int(SR * 240 / 126 * 2)) / SR) * 0.5
     sf.write(lib / "Pack_126_Gm_Bass_Loop.wav", bass, SR)
+    # Duplicados: una copia exacta con otro nombre y el mismo audio con metadata distinta
+    (lib / "copias").mkdir(exist_ok=True)
+    shutil.copy(lib / "raro" / "cosa1.wav", lib / "copias" / "Kick copiado.wav")
+    tagged = lib / "copias" / "Bass con tempo.wav"
+    shutil.copy(lib / "Pack_126_Gm_Bass_Loop.wav", tagged)
+    with open(tagged, "r+b") as f:  # chunk acid: 8 beats a 126 BPM
+        f.seek(0, 2)
+        f.write(b"acid" + struct.pack("<I", 24) + struct.pack("<IHHfIHHf", 0, 60, 0, 0, 8, 4, 4,
+                                                             126.0))
+        size = f.tell() - 8
+        f.seek(4)
+        f.write(struct.pack("<I", size))
 
 
 def analyze(lib: Path) -> None:
@@ -71,6 +89,9 @@ def analyze(lib: Path) -> None:
         print(f"{r['name']:28} {r['kind'] or '-':8} bpm={r['bpm']} ({r['bpm_source']}) "
               f"key={r['key']} ({r['key_source']}) inst={r['instrument']} "
               f"({r['instrument_source']}) err={r['error']}")
+    print("Duplicados:")
+    for r in db.search(conn, duplicates=True):
+        print(f"  {r['content_hash'][:8]} {r['path']}")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
      identificar.
    - **Tipo:** loops o one-shots.
    - **BPM:** rango desde–hasta (`—` = sin límite).
+   - **Duración:** rango en segundos, igual que el BPM. Lo que todavía no se analizó no tiene
+     duración y no aparece mientras el filtro esté puesto.
    - **Key:** una tonalidad exacta.
    - **Buscar** (arriba): palabras sueltas sobre el nombre y las carpetas, por ejemplo
      `techno vol 2 bass`.
@@ -58,6 +60,25 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
    la carpeta que agregaste, nunca más arriba. Si en una carpeta hay varias, gana la que se
    llama `cover…`, `artwork…`, `folder…`, `front…` o como el pack; si no, la más pesada. Se
    busca al escanear: si agregás una portada a un pack, aparece con **Re-escanear**.
+8. **Forma de onda:** debajo de la portada se ve la onda del sample elegido, con el cursor de
+   reproducción avanzando. Hacé clic sobre la onda para reproducir desde ese punto. Se calcula
+   una vez (en el análisis, o en segundo plano al elegir un sample que todavía no la tiene) y
+   queda guardada en la base; se recalcula solo si el archivo cambia. También hay una mini onda
+   por fila: clic derecho en el encabezado → *Forma de onda (mini)* (arranca oculta).
+9. **Duplicados:** en el panel *Biblioteca*, la vista **Duplicados** junta los archivos con el
+   mismo audio aunque estén en otras carpetas o con otro nombre. Cada grupo va junto y con un
+   fondo que alterna. En el panel de la derecha, un sample duplicado lista sus otras copias:
+   clic en una para ir a ella (también con clic derecho → *Ir a otra copia*). *Mostrar en el
+   Explorador* abre la carpeta de cada una. El filtro **Ocultar duplicados** deja uno por grupo
+   en cualquier vista. La app **no borra ni mueve** archivos: si querés limpiar, hacelo desde
+   el Explorador.
+
+   Para comparar se usa una huella del audio: en WAV y AIFF solo cuentan el formato y las
+   muestras, así que dos copias con distinta metadata (por ejemplo, una a la que Ableton le
+   guardó el tempo) cuentan como duplicadas. En MP3, FLAC y OGG se compara el archivo entero.
+   La huella se calcula en el análisis y solo se recalcula si el archivo cambia (fecha o
+   tamaño). Al actualizar desde una versión anterior, la app calcula ondas y huellas de toda la
+   librería una vez, en segundo plano.
 
 ### Organizar a mano
 
@@ -72,8 +93,9 @@ filas elegidas.
 | **Historial** | En el panel *Biblioteca*: los últimos 200 samples que escuchaste, del más reciente al más viejo. Clic derecho para vaciarlo. |
 | **Editar datos y tags** | `F2` o clic derecho → *Editar datos y tags…*: tipo, instrumento, BPM y key, más tags libres para agregar o quitar. Con varias filas, cada campo muestra "(varios)" si no coinciden y solo se cambia lo que toques. Dejá el BPM vacío o elegí `—` para dejar un dato vacío. |
 
-**Filtros:** *Biblioteca* (toda la librería, historial o una colección), *Estrellas* (mínimo),
-*Tag* y *Solo favoritos* se suman a los demás filtros. La búsqueda de texto también encuentra
+**Filtros:** *Biblioteca* (toda la librería, historial, duplicados o una colección),
+*Estrellas* (mínimo), *Tag*, *Solo favoritos* y *Ocultar duplicados* se suman a los demás
+filtros. La búsqueda de texto también encuentra
 los tags.
 
 Lo que corregís a mano queda con fuente `user`: gana sobre cualquier otra fuente y ni
@@ -206,7 +228,7 @@ src/sample_scout/
   metadata.py     chunk acid de los WAV
   analyzer.py     análisis de audio con librosa
   updater.py      actualización desde los releases de GitHub
-tests/            tests de parser.py, analyzer.py y de los datos del usuario (pytest)
+tests/            tests de parser.py, analyzer.py, datos del usuario, duplicados y onda
 tools/
   build_installer.ps1   arma el Python embebido, el instalador y el zip de actualización
   install_local.ps1     instala sin el Setup (PCs con Control inteligente de aplicaciones)
@@ -221,11 +243,13 @@ VERSION, RUNTIME, requirements.txt, CHANGELOG.md
 ### Probar
 
 - **Lógica pura:** `pytest` cubre el parser de nombres, la estimación de BPM y tipo, la
-  migración de la base, la precedencia de la fuente `user` y que los datos del usuario
-  sobrevivan a re-escanear.
+  migración de la base, la precedencia de la fuente `user`, que los datos del usuario
+  sobrevivan a re-escanear, la huella de duplicados y que la onda se invalide si cambia el
+  archivo.
 - **Análisis de audio:**
   `.venv/Scripts/python tools/make_test_samples.py C:\temp\ss-lib --analyze` genera samples
-  sintéticos e imprime lo que detectó. El docstring del script tiene la tabla esperada.
+  sintéticos (con dos grupos de duplicados) e imprime lo que detectó. El docstring del
+  script tiene la tabla esperada.
   La base de prueba queda en esa carpeta, no en tu librería.
 - **Actualización:** instalá la app, levantá `tools/fake_release.py 0.1.1` y abrí la app
   instalada con `SAMPLE_SCOUT_UPDATE_URL=http://127.0.0.1:8799` (los pasos están en el
