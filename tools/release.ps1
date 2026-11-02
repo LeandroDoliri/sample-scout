@@ -24,8 +24,10 @@ try {
     if ((git rev-parse --abbrev-ref HEAD) -ne 'main') { throw 'Publicá desde main.' }
     git fetch -q origin main
     if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { throw 'main no coincide con origin/main: hacé push (o pull) primero.' }
-    gh release view $tag *> $null
-    if ($LASTEXITCODE -eq 0) { throw "El release $tag ya existe: subí el número en VERSION." }
+    # Sin "gh release view": en PowerShell 5.1 su stderr ("release not found") corta el script
+    $existing = gh release list --limit 200 --json tagName --jq '.[].tagName'
+    if ($LASTEXITCODE) { throw 'No se pudo consultar GitHub con gh (¿gh auth login?).' }
+    if ($existing -contains $tag) { throw "El release $tag ya existe: subí el número en VERSION." }
 
     & "$PSScriptRoot\build_installer.ps1" -Version $version
     Copy-Item "dist\SampleScoutSetup-$version.exe" 'dist\SampleScoutSetup.exe' -Force
