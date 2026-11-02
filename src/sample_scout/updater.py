@@ -38,7 +38,7 @@ UPDATE_WORK = APP_DIR / "_update"
 
 
 class UpdateError(Exception):
-    pass
+    """La actualización no se aplicó. El mensaje está pensado para mostrárselo al usuario."""
 
 
 class NeedsInstaller(UpdateError):
@@ -46,11 +46,12 @@ class NeedsInstaller(UpdateError):
 
 
 def version_tuple(v: str) -> tuple[int, ...]:
+    """"0.10.1" -> (0, 10, 1), para comparar versiones como números y no como texto."""
     return tuple(int(p) for p in re.findall(r"\d+", v))
 
 
 def is_git_checkout() -> bool:
-    # Desde el repo solo se avisa: los archivos los maneja git, no el actualizador
+    """True si corre desde el repo: ahí solo se avisa, los archivos los maneja git."""
     return (APP_DIR / ".git").exists()
 
 

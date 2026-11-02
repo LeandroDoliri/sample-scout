@@ -75,6 +75,8 @@ _BPM = re.compile(r"^(\d{2,3}(?:\.\d+)?)bpm$")
 
 @dataclass
 class ParsedPath:
+    """Lo que se pudo deducir de la ruta. None = no se encontró (lo completa el análisis de audio)."""
+
     bpm: float | None = None
     key: str | None = None
     instrument: str | None = None
@@ -120,6 +122,8 @@ def _find_kind(words: list[str]) -> str | None:
 
 
 def normalize_key(note: str, accidental: str | None, mode: str | None) -> str:
+    """Nombre canónico de la tonalidad: siempre con sostenidos y "m" para menor
+    ("eb" + "min" -> "D#m"), así un mismo filtro encuentra "Ebm" y "D#min"."""
     note = note.lower()
     if accidental in ("b", "flat"):
         name = _FLATS.get(note + "b") or NOTES[(NOTES.index(note.upper()) - 1) % 12]

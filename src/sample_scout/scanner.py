@@ -140,6 +140,9 @@ def _apply(conn: sqlite3.Connection, sample: dict, job: dict) -> None:
 def analyze_pending(conn: sqlite3.Connection, progress: Progress | None = None,
                     should_stop: Callable[[], bool] = lambda: False,
                     workers: int | None = None) -> int:
+    """Analiza en paralelo (un proceso por núcleo menos uno) todo lo que tenga analyzed = 0 y
+    guarda cada resultado apenas llega. Devuelve cuántos procesó. Un archivo que falla queda
+    analizado con su error en la columna `error`, para no reintentarlo en cada arranque."""
     pending = [dict(r) for r in conn.execute("SELECT * FROM samples WHERE analyzed = 0")]
     if not pending:
         return 0

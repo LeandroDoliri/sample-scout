@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sample-scout"
-version = "0.1.0"
+dynamic = ["version"]  # sale del archivo VERSION, como la app y el instalador
 description = "Librería de samples que se analiza y ordena sola, con arrastre directo a Ableton."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,10 +17,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pillow"]  # pillow: tools/make_icon.py
 
 [project.gui-scripts]
 sample-scout = "sample_scout.app:main"
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

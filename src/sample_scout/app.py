@@ -34,6 +34,9 @@ KIND_LABELS = {"loop": "Loop", "oneshot": "One-shot"}
 
 
 class SampleModel(QAbstractTableModel):
+    """Tabla de samples: cada fila es un dict de la tabla `samples`. Ordena en memoria (los
+    vacíos siempre al final) y entrega rutas de archivo al arrastrar."""
+
     def __init__(self) -> None:
         super().__init__()
         self.rows: list[dict] = []
@@ -159,6 +162,9 @@ class TaskWorker(QObject):
 
 
 class MainWindow(QMainWindow):
+    """Ventana principal. Al abrir: muestra la librería, re-escanea las carpetas (solo procesa lo
+    nuevo o modificado) y consulta en segundo plano si hay una versión nueva."""
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"Sample Scout {__version__}")
@@ -183,6 +189,8 @@ class MainWindow(QMainWindow):
         self.run_task(lambda _log: updater.check(), self._on_update_checked)
 
     def run_task(self, fn, on_done, on_failed=None) -> None:
+        """Corre fn(log) en un hilo aparte. on_done / on_failed se llaman en el hilo de la
+        ventana con el resultado o la excepción; los mensajes de log van a la barra de estado."""
         thread = QThread(self)
         worker = TaskWorker(fn)
         worker.moveToThread(thread)
@@ -325,6 +333,7 @@ class MainWindow(QMainWindow):
 
     # --- Datos ---
     def refresh(self) -> None:
+        """Vuelve a consultar la base con los filtros actuales y actualiza tabla, panel y estado."""
         self._refresh_sidebar()
         item = self.instruments.currentItem()
         rows = db.search(
@@ -381,6 +390,7 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def start_scan(self) -> None:
+        """Indexa y analiza todas las carpetas en un LibraryWorker. No hace nada si ya hay uno."""
         if self.thread:
             return
         roots = db.list_roots(self.conn)
@@ -453,6 +463,7 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(page))
 
     def apply_update(self) -> None:
+        """Botón del aviso: frena el análisis, aplica la actualización en otro hilo y reinicia."""
         if self.update_info.get("reason") == "installer":
             self.open_release_page()
             return
@@ -505,6 +516,7 @@ def _setup_logging() -> None:
 
 
 def main() -> None:
+    """Punto de entrada (`python -m sample_scout` y el script `sample-scout`)."""
     multiprocessing.freeze_support()
     _setup_logging()
     if os.name == "nt":

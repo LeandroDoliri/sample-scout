@@ -16,6 +16,7 @@ STRONG_ONSET = 1.5
 
 
 def duration_of(path: str) -> float:
+    """Duración real en segundos, leyendo solo el encabezado (el audio se carga recortado)."""
     import soundfile as sf
 
     try:
@@ -27,6 +28,7 @@ def duration_of(path: str) -> float:
 
 
 def guess_kind(duration: float, onset_count: int) -> str:
+    """"oneshot" si es corto o tiene pocos ataques fuertes; si no, "loop"."""
     if duration < 1.5 or (duration < 6 and onset_count <= 2):
         return "oneshot"
     return "loop"
@@ -63,6 +65,8 @@ def estimate_bpm(tempo: float, duration: float, onset_count: int = 99) -> float 
 
 
 def estimate_key(chroma_profile: np.ndarray) -> str | None:
+    """Tonalidad ("Am", "F#") que mejor correlaciona con el perfil cromático promedio, comparado
+    con los 24 perfiles de Krumhansl-Kessler. None si ninguna llega a KEY_MIN_CORRELATION."""
     if not np.any(chroma_profile):
         return None
     best_corr, best_key = -1.0, None
@@ -96,6 +100,9 @@ def guess_oneshot_instrument(y: np.ndarray, sr: int, duration: float) -> str | N
 
 def analyze(path: str, need_bpm: bool = True, need_key: bool = True,
             need_instrument: bool = True, kind_hint: str | None = None) -> dict:
+    """Analiza un archivo y devuelve las claves que pudo estimar: duration siempre, y kind, bpm,
+    key e instrument cuando corresponde. Los need_* evitan calcular lo que ya se sabe por el
+    nombre o la metadata; kind_hint usa el tipo ya conocido en lugar de estimarlo."""
     import warnings
 
     import librosa

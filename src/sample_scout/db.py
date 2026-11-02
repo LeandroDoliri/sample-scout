@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_samples_analyzed ON samples(analyzed);
 
 
 def default_db_path() -> Path:
+    """%APPDATA%\\SampleScout\\library.db, o lo que diga SAMPLE_SCOUT_DB."""
     if os.environ.get("SAMPLE_SCOUT_DB"):  # para pruebas o para tener varias librerías
         return Path(os.environ["SAMPLE_SCOUT_DB"])
     base = Path(os.environ.get("APPDATA") or Path.home()) / "SampleScout"
@@ -43,6 +44,8 @@ def default_db_path() -> Path:
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
+    """Abre la base (creando el esquema si falta) en modo WAL, para que la ventana lea mientras
+    el hilo de escaneo escribe. Cada hilo usa su propia conexión."""
     conn = sqlite3.connect(str(path or default_db_path()), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -51,15 +54,18 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def list_roots(conn: sqlite3.Connection) -> list[str]:
+    """Carpetas raíz que el usuario agregó a la librería."""
     return [r["path"] for r in conn.execute("SELECT path FROM roots ORDER BY path")]
 
 
 def add_root(conn: sqlite3.Connection, path: str) -> None:
+    """Registra una carpeta raíz (el escaneo se lanza aparte)."""
     conn.execute("INSERT OR IGNORE INTO roots(path) VALUES (?)", (path,))
     conn.commit()
 
 
 def remove_root(conn: sqlite3.Connection, path: str) -> None:
+    """Quita la carpeta y sus samples del índice. Los archivos del disco no se tocan."""
     conn.execute("DELETE FROM samples WHERE root = ?", (path,))
     conn.execute("DELETE FROM roots WHERE path = ?", (path,))
     conn.commit()
@@ -68,6 +74,9 @@ def remove_root(conn: sqlite3.Connection, path: str) -> None:
 def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = None,
            kind: str | None = None, bpm_min: float | None = None, bpm_max: float | None = None,
            key: str | None = None, limit: int = 20000) -> list[dict]:
+    """Samples que cumplen todos los filtros, ordenados por nombre. `text` busca cada palabra en
+    la ruta completa (nombre, carpetas, pack). `instrument="__none__"` trae los sin clasificar.
+    Los filtros en None (o 0 para el BPM) no filtran."""
     where: list[str] = []
     params: list = []
     for word in text.lower().split():
@@ -99,6 +108,7 @@ def search(conn: sqlite3.Connection, text: str = "", instrument: str | None = No
 
 
 def instrument_counts(conn: sqlite3.Connection) -> dict[str | None, int]:
+    """Cantidad de samples por instrumento (la clave None son los sin clasificar)."""
     rows = conn.execute("SELECT instrument, COUNT(*) AS n FROM samples GROUP BY instrument")
     return {r["instrument"]: r["n"] for r in rows}
 

@@ -8,11 +8,18 @@ from dataclasses import dataclass
 
 @dataclass
 class AcidInfo:
+    """Lo útil del chunk acid: si está marcado como one-shot y su tempo (None si no es confiable)."""
+
     oneshot: bool
     tempo: float | None
 
 
 def read_acid(path: str) -> AcidInfo | None:
+    """Recorre los chunks RIFF del WAV sin leer el audio. None si no es WAV o no tiene chunk acid.
+
+    Estructura del chunk (24 bytes): flags (uint32, bit 0 = one-shot), nota raíz (uint16),
+    2 bytes, float, cantidad de beats (uint32), compás (2 x uint16) y tempo (float).
+    """
     if not path.lower().endswith(".wav"):
         return None
     try:
