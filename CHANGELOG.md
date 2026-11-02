@@ -8,6 +8,19 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); v
 
 ## [Sin publicar]
 
+### Agregado
+- Modo **Carpetas**, al lado del de siempre (**Librería**): un árbol con cada carpeta agregada
+  y sus subcarpetas tal como están en el disco, con la cantidad de samples de cada una y la
+  portada del pack. Al elegir una carpeta, la lista muestra sus samples y los de sus
+  subcarpetas (o solo los directos, destildando *Incluir subcarpetas*), con todos los filtros,
+  la búsqueda y la búsqueda por sonido. Clic derecho: *Abrir en el Explorador*, *Agregar todo a
+  una colección* y *Quitar de la librería*. Desde la lista, clic derecho → *Ir a su carpeta*.
+  Se recuerdan el modo, la carpeta abierta y las carpetas desplegadas.
+
+### Cambiado
+- La base pasa al esquema 5 (índice por carpeta, para armar el árbol y filtrar rápido); las
+  bases anteriores se actualizan solas.
+
 ## [0.3.0] - 2026-11-02
 
 ### Agregado

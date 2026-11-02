@@ -161,7 +161,7 @@ def test_migra_base_del_esquema_2(tmp_path):
     old.close()
 
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     [row] = db.search(conn)
     assert (row["bpm"], row["favorite"], row["rating"], row["copies"]) == (120, 1, 4, 0)
     assert row["peaks"] is None

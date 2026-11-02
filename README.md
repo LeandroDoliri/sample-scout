@@ -82,6 +82,24 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
    tamaño). Al actualizar desde una versión anterior, la app calcula ondas y huellas de toda la
    librería una vez, en segundo plano.
 10. **Sonidos parecidos y búsqueda por sonido:** ver [Funciones de IA](#funciones-de-ia).
+11. **Librería o Carpetas:** arriba del panel izquierdo elegís cómo recorrer los samples.
+    - **Librería** (la de siempre): todo junto, para buscar, con el panel *Biblioteca*
+      (historial, duplicados, colecciones).
+    - **Carpetas**: un árbol con cada carpeta que agregaste y sus subcarpetas tal como están en
+      el disco, como en el Explorador. Cada carpeta muestra cuántos samples tiene adentro
+      (contando las subcarpetas) y, si tiene portada, la del pack. Al elegir una, la lista
+      muestra sus samples **y los de sus subcarpetas**; destildá **Incluir subcarpetas** para
+      ver solo los archivos que están directamente en ella. Los filtros, la búsqueda (también
+      la búsqueda por sonido), la preescucha, el arrastre, los favoritos y las colecciones
+      andan igual, dentro de la carpeta elegida.
+
+    Clic derecho sobre una carpeta: *Abrir en el Explorador*, *Copiar ruta*, *Agregar todo a
+    una colección* (todos sus samples y los de sus subcarpetas, sin mirar los filtros) y, en una
+    carpeta raíz, *Quitar de la librería*. Desde la lista, clic derecho → **Ir a su carpeta**
+    abre la carpeta de un sample en el árbol. *Sonidos parecidos* vuelve al modo Librería,
+    porque busca en toda la librería. El modo, la carpeta abierta, las carpetas desplegadas y
+    *Incluir subcarpetas* se recuerdan entre aperturas. El árbol se arma con lo que ya está
+    indexado (no recorre el disco): una carpeta nueva aparece después de **Re-escanear**.
 
 ### Organizar a mano
 
@@ -114,7 +132,8 @@ fuente de cada dato (`user`, `meta`, `name` o `audio`, explicadas abajo) y los t
 
 **Re-escanear** vuelve a recorrer las carpetas: suma lo nuevo, re-analiza lo modificado y
 quita lo borrado. También pasa solo cada vez que abrís la app. **Quitar carpeta** (elegila
-primero en la lista "Carpetas") la saca de la librería sin tocar los archivos. Mientras haya un
+primero en la lista "Carpetas" del modo Librería, o clic derecho sobre la raíz en el modo
+Carpetas) la saca de la librería sin tocar los archivos. Mientras haya un
 análisis en curso no hace nada: esperá a que termine.
 
 ## Funciones de IA
@@ -274,6 +293,7 @@ src/sample_scout/
   __main__.py     python -m sample_scout
   app.py          ventana PySide6: filtros, tabla, preescucha, arrastre y aviso de actualización
   db.py           esquema SQLite, migraciones, consultas y datos del usuario (por ruta)
+  folders.py      árbol de carpetas del modo Carpetas (desde la base, sin recorrer el disco)
   scanner.py      escaneo incremental de carpetas, análisis en paralelo (ProcessPoolExecutor)
                   y embeddings de CLAP (un solo proceso aparte)
   clap.py         funciones de IA: descarga del modelo, mel, encoders ONNX, traducción y búsqueda

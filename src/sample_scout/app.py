@@ -13,7 +13,7 @@ import threading
 import traceback
 from collections import OrderedDict
 
-from PySide6.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
+from PySide6.QtCore import (QAbstractItemModel, QAbstractTableModel, QItemSelection, QItemSelectionModel, QMimeData,
                             QModelIndex, QObject, QRegularExpression, QRunnable, QSettings, QSize,
                             Qt, QThread, QThreadPool, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QGuiApplication,
@@ -24,11 +24,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QCompleter, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QProgressDialog, QPushButton, QSpinBox, QSplitter,
-                               QStyledItemDelegate, QTableView, QToolBar, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QProgressDialog, QPushButton, QSpinBox, QSplitter, QStyle,
+                               QStyledItemDelegate, QTabBar, QTableView, QToolBar, QToolButton,
+                               QTreeView, QVBoxLayout, QWidget)
 
-from sample_scout import APP_DIR, __version__, clap, db, scanner, updater
+from sample_scout import APP_DIR, __version__, clap, db, folders, scanner, updater
 from sample_scout.analyzer import NOTES
 from sample_scout.parser import INSTRUMENT_LABELS
 
@@ -397,6 +397,82 @@ class SampleModel(QAbstractTableModel):
 
     def supportedDragActions(self):
         return Qt.CopyAction
+
+
+class FolderModel(QAbstractItemModel):
+    """Árbol de la vista Carpetas sobre los nodos de `folders.build_tree`: nombre (con la
+    portada del pack si la carpeta tiene una) y cuántos samples hay adentro, contando las
+    subcarpetas. No crea objetos por ítem, así anda igual con miles de carpetas."""
+
+    def __init__(self, covers: CoverCache, icon: QIcon) -> None:
+        super().__init__()
+        self.tree: list[folders.FolderNode] = []
+        self.covers = covers
+        self.icon = icon
+        self._by_cover: dict[str, list[folders.FolderNode]] = {}
+        covers.loaded.connect(self._on_cover_loaded)
+
+    def set_tree(self, tree: list[folders.FolderNode]) -> None:
+        self.beginResetModel()
+        self.tree = tree
+        self._by_cover = {}
+        for top in tree:
+            for node in top.walk():
+                if node.cover:
+                    self._by_cover.setdefault(node.cover, []).append(node)
+        self.endResetModel()
+
+    def node(self, index: QModelIndex) -> folders.FolderNode | None:
+        return index.internalPointer() if index.isValid() else None
+
+    def index_of(self, node: folders.FolderNode | None) -> QModelIndex:
+        return self.createIndex(node.row, 0, node) if node else QModelIndex()
+
+    def _on_cover_loaded(self, path: str) -> None:
+        for node in self._by_cover.get(path, ()):
+            index = self.index_of(node)
+            self.dataChanged.emit(index, index, [Qt.DecorationRole])
+
+    def index(self, row, column, parent=QModelIndex()) -> QModelIndex:
+        children = self.node(parent).children if parent.isValid() else self.tree
+        if not (0 <= row < len(children) and 0 <= column < 2):
+            return QModelIndex()
+        return self.createIndex(row, column, children[row])
+
+    def parent(self, index=None):
+        if index is None:  # QObject.parent()
+            return QObject.parent(self)
+        node = self.node(index)
+        return self.index_of(node.parent) if node and node.parent else QModelIndex()
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        if parent.column() > 0:
+            return 0
+        return len(self.node(parent).children) if parent.isValid() else len(self.tree)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 2
+
+    def data(self, index, role=Qt.DisplayRole):
+        node = self.node(index)
+        if node is None:
+            return None
+        column = index.column()
+        if role == Qt.DisplayRole:
+            return node.name if column == 0 else f"{node.total:,}".replace(",", ".")
+        if role == Qt.DecorationRole and column == 0:
+            pixmap = self.covers.thumb(node.cover) if node.cover else None
+            return pixmap or self.icon
+        if role == Qt.ToolTipRole:
+            text = f"{node.path}\n{node.total} samples"
+            if node.children:
+                text += f" ({node.direct} sueltos en esta carpeta)"
+            return text
+        if role == Qt.TextAlignmentRole and column == 1:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.ForegroundRole and (column == 1 or not node.total):
+            return QColor("#9ca3af")
+        return None
 
 
 class ViewList(QListWidget):
@@ -841,20 +917,81 @@ class MainWindow(QMainWindow):
         self.roots = QListWidget()
         self.roots.setMaximumHeight(120)
         remove_root = QPushButton("Quitar carpeta")
-        remove_root.clicked.connect(self.remove_folder)
+        remove_root.clicked.connect(lambda: self.remove_folder())
+
+        # Vista Carpetas: el árbol de cada raíz tal como está en el disco (folders.py).
+        settings = self._settings()
+        self.folder_model = FolderModel(self.covers,
+                                        self.style().standardIcon(QStyle.SP_DirIcon))
+        self.folder_tree = QTreeView()
+        self.folder_tree.setModel(self.folder_model)
+        self.folder_tree.setHeaderHidden(True)
+        self.folder_tree.setUniformRowHeights(True)  # rápido con miles de carpetas
+        self.folder_tree.setIconSize(QSize(CoverCache.THUMB, CoverCache.THUMB))
+        tree_header = self.folder_tree.header()
+        tree_header.setStretchLastSection(False)
+        tree_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        tree_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.folder_tree.selectionModel().currentChanged.connect(self._on_folder_changed)
+        self.folder_tree.expanded.connect(
+            lambda index: self._expanded.add(self.folder_model.node(index).path))
+        self.folder_tree.collapsed.connect(
+            lambda index: self._expanded.discard(self.folder_model.node(index).path))
+        self.folder_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.folder_tree.customContextMenuRequested.connect(self._folder_menu)
+        self.subfolders = QCheckBox("Incluir subcarpetas")
+        self.subfolders.setToolTip("Sin marcar, la lista muestra solo los archivos que están "
+                                   "directamente en la carpeta elegida")
+        self.subfolders.setChecked(settings.value("browse/subfolders", True, type=bool))
+        self.subfolders.toggled.connect(self._on_subfolders_toggled)
+        self._folders_dirty = True  # el árbol se rearma al cambiar la librería
+        self._reset_scroll = False  # otra carpeta: la lista vuelve arriba
+        try:
+            self._expanded: set[str] = set(json.loads(settings.value("browse/expanded", "[]")))
+        except (TypeError, ValueError):
+            self._expanded = set()
+        self._saved_folder = settings.value("browse/folder", "") or ""
+
+        # Modo de la barra lateral: Librería (todo junto, para buscar) o Carpetas (explorador).
+        self.mode_tabs = QTabBar()
+        self.mode_tabs.addTab("Librería")
+        self.mode_tabs.addTab("Carpetas")
+        self.mode_tabs.setExpanding(True)
+        self.mode_tabs.setToolTip("Librería: todo junto, para buscar. Carpetas: navegá cada "
+                                  "carpeta como en el Explorador.")
+        if settings.value("browse/mode", "library") == "folders":
+            self.mode_tabs.setCurrentIndex(1)
+        self.mode_tabs.currentChanged.connect(self._on_mode_changed)
+
+        self.library_panel = QWidget()
+        library_layout = QVBoxLayout(self.library_panel)
+        library_layout.setContentsMargins(0, 0, 0, 0)
+        library_layout.addWidget(QLabel("<b>Biblioteca</b>"))
+        library_layout.addWidget(self.views)
+        library_layout.addWidget(new_collection)
+        self.folders_panel = QWidget()
+        folders_layout = QVBoxLayout(self.folders_panel)
+        folders_layout.setContentsMargins(0, 0, 0, 0)
+        folders_layout.addWidget(self.folder_tree, 1)
+        folders_layout.addWidget(self.subfolders)
+        self.roots_panel = QWidget()
+        roots_layout = QVBoxLayout(self.roots_panel)
+        roots_layout.setContentsMargins(0, 0, 0, 0)
+        roots_layout.addWidget(QLabel("<b>Carpetas</b>"))
+        roots_layout.addWidget(self.roots)
+        roots_layout.addWidget(remove_root)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("<b>Biblioteca</b>"))
-        left_layout.addWidget(self.views)
-        left_layout.addWidget(new_collection)
+        left_layout.addWidget(self.mode_tabs)
+        left_layout.addWidget(self.library_panel)
+        left_layout.addWidget(self.folders_panel, 2)
         left_layout.addWidget(QLabel("<b>Instrumento</b>"))
         left_layout.addWidget(self.instruments, 1)
         left_layout.addLayout(filters)
         left_layout.addWidget(self.autoplay)
-        left_layout.addWidget(QLabel("<b>Carpetas</b>"))
-        left_layout.addWidget(self.roots)
-        left_layout.addWidget(remove_root)
+        left_layout.addWidget(self.roots_panel)
+        self._update_mode_widgets()
 
         splitter = QSplitter()
         splitter.addWidget(left)
@@ -878,7 +1015,7 @@ class MainWindow(QMainWindow):
         detail.setMinimumWidth(CoverCache.BIG + 20)
         splitter.addWidget(detail)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([270, 1130, CoverCache.BIG + 30])
+        splitter.setSizes([300, 1100, CoverCache.BIG + 30])
         self._update_detail()
 
         # Aviso de versión nueva (oculto hasta que el chequeo encuentre una)
@@ -915,17 +1052,35 @@ class MainWindow(QMainWindow):
 
     # --- Datos ---
     def current_view(self) -> tuple[str, int | None]:
-        """("all", None), ("history", None), ("duplicates", None), ("similar", None) o
-        ("collection", id)."""
+        """("all", None), ("history", None), ("duplicates", None), ("similar", None),
+        ("collection", id) o, en el modo Carpetas, ("folder", None)."""
+        if self.browse_mode() == "folders":
+            return "folder", None
+        return self._library_view()
+
+    def _library_view(self) -> tuple[str, int | None]:
         item = self.views.currentItem()
         return item.data(Qt.UserRole) if item else ("all", None)
+
+    def browse_mode(self) -> str:
+        """"library" (todo junto) o "folders" (árbol de carpetas)."""
+        return "folders" if self.mode_tabs.currentIndex() == 1 else "library"
+
+    def current_folder(self) -> folders.FolderNode | None:
+        """La carpeta elegida en el árbol (None fuera del modo Carpetas o sin carpetas)."""
+        if self.browse_mode() != "folders":
+            return None
+        return self.folder_model.node(self.folder_tree.currentIndex())
 
     def refresh(self) -> None:
         """Vuelve a consultar la base con los filtros actuales y actualiza tabla, panel y estado.
         Conserva la selección y la posición de la lista (sin volver a reproducir)."""
         self._refresh_sidebar()
+        if self.browse_mode() == "folders" and self._folders_dirty:
+            self._rebuild_folders()
         item = self.instruments.currentItem()
         view, view_id = self.current_view()
+        folder = self.current_folder()
         ranking = self._ranking()
         rows = db.search(
             self.conn,
@@ -944,6 +1099,8 @@ class MainWindow(QMainWindow):
             duration_max=self.duration_max.value() or None,
             duplicates=view == "duplicates",
             hide_duplicates=self.hide_duplicates.isChecked() and view != "duplicates",
+            folder=(folder.root, folder.folder) if folder else None,
+            subfolders=self.subfolders.isChecked(),
             limit=10 ** 9 if ranking is not None else 20000,  # el ranking corta después
         )
         if ranking is not None:
@@ -955,6 +1112,8 @@ class MainWindow(QMainWindow):
         current = self.table.currentIndex()
         current_path = self.model.rows[current.row()]["path"] if current.isValid() else None
         scroll = self.table.verticalScrollBar().value()
+        if self._reset_scroll:
+            scroll, self._reset_scroll = 0, False
         self._restoring = True
         try:
             self.model.grouped = view == "duplicates"
@@ -966,6 +1125,8 @@ class MainWindow(QMainWindow):
         total, pending = db.stats(self.conn)
         busy = " — trabajando…" if self.thread else ""
         text = f"{len(rows)} de {total} samples · {pending} sin analizar"
+        if folder:
+            text = f"{folder.name}: " + text
         if self.ai_enabled():
             done, _total = db.embedding_stats(self.conn, clap.MODEL_ID)
             if done < total:
@@ -1032,16 +1193,20 @@ class MainWindow(QMainWindow):
 
     def go_to(self, path: str) -> None:
         """Selecciona ese sample en la lista. Si los filtros lo ocultan, pasa a la vista
-        "Duplicados" sin filtros (ahí están todas las copias)."""
+        "Duplicados" sin filtros (ahí están todas las copias); en el modo Carpetas, abre la
+        carpeta del archivo."""
         if self.model.row_of(path) is None:
             self._clear_filters()
             self.similar = None
-            for i in range(self.views.count()):
-                if self.views.item(i).data(Qt.UserRole) == ("duplicates", None):
-                    self.views.blockSignals(True)
-                    self.views.setCurrentRow(i)
-                    self.views.blockSignals(False)
-            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+            if self.browse_mode() == "folders":
+                self._select_folder(os.path.dirname(path))
+            else:
+                for i in range(self.views.count()):
+                    if self.views.item(i).data(Qt.UserRole) == ("duplicates", None):
+                        self.views.blockSignals(True)
+                        self.views.setCurrentRow(i)
+                        self.views.blockSignals(False)
+                self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
             self.refresh()
             self.search_timer.stop()
         row = self.model.row_of(path)
@@ -1148,7 +1313,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_sidebar(self) -> None:
         # Biblioteca: toda la librería, historial y colecciones.
-        selected_view = self.current_view()
+        selected_view = self._library_view()
         total, _pending = db.stats(self.conn)
         entries = [("Toda la librería", ("all", None), total),
                    ("Historial", ("history", None), db.history_count(self.conn)),
@@ -1213,6 +1378,139 @@ class MainWindow(QMainWindow):
         if view != "similar" and self.similar:
             self.similar = None  # al salir de la vista se descarta
         self._schedule_refresh()
+
+    # --- Modo Carpetas ---
+    def _update_mode_widgets(self) -> None:
+        folders_mode = self.browse_mode() == "folders"
+        self.library_panel.setVisible(not folders_mode)
+        self.roots_panel.setVisible(not folders_mode)  # en Carpetas las raíces están en el árbol
+        self.folders_panel.setVisible(folders_mode)
+
+    def _on_mode_changed(self, *_args) -> None:
+        self._settings().setValue("browse/mode", self.browse_mode())
+        self._update_mode_widgets()
+        if self.browse_mode() == "library" and self._library_view()[0] in (
+                "history", "duplicates", "similar"):
+            self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self._reset_scroll = True
+        self.refresh()
+        self.search_timer.stop()
+
+    def set_browse_mode(self, mode: str) -> None:
+        """Cambia de modo sin consultar la base (el que llama hace el refresh)."""
+        if mode != self.browse_mode():
+            self.mode_tabs.blockSignals(True)
+            self.mode_tabs.setCurrentIndex(1 if mode == "folders" else 0)
+            self.mode_tabs.blockSignals(False)
+            self._settings().setValue("browse/mode", mode)
+            self._update_mode_widgets()
+            self._reset_scroll = True
+
+    def _rebuild_folders(self) -> None:
+        """Rearma el árbol con lo que hay en la base y vuelve a dejar abiertas las carpetas que
+        estaban abiertas y elegida la misma carpeta (o la primera raíz)."""
+        current = self.folder_model.node(self.folder_tree.currentIndex())
+        selected = current.path if current else self._saved_folder
+        tree = folders.build_tree(db.list_roots(self.conn), db.folder_counts(self.conn))
+        self._folders_dirty = False
+        expanded = set(self._expanded)
+        self.folder_tree.blockSignals(True)  # expanded/collapsed: los restauramos nosotros
+        self.folder_model.set_tree(tree)
+        for path in expanded:
+            node = folders.find(tree, path)
+            if node is not None:
+                self.folder_tree.setExpanded(self.folder_model.index_of(node), True)
+        self.folder_tree.blockSignals(False)
+        self._expanded = {p for p in expanded if folders.find(tree, p) is not None}
+        if not self._select_folder(selected) and tree:
+            self._select_folder(tree[0].path)
+
+    def _select_folder(self, path: str) -> bool:
+        """Elige esa carpeta en el árbol (abriendo las de arriba) sin consultar la base. False
+        si no está."""
+        node = folders.find(self.folder_model.tree, path) if path else None
+        if node is None:
+            return False
+        parent = node.parent
+        while parent is not None:
+            self.folder_tree.expand(self.folder_model.index_of(parent))
+            parent = parent.parent
+        index = self.folder_model.index_of(node)
+        selection = self.folder_tree.selectionModel()
+        selection.blockSignals(True)
+        selection.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect
+                                  | QItemSelectionModel.Rows)
+        selection.blockSignals(False)
+        self.folder_tree.viewport().update()
+        self.folder_tree.scrollTo(index)
+        self._remember_folder(node)
+        return True
+
+    def _remember_folder(self, node: folders.FolderNode) -> None:
+        if node.path != self._saved_folder:
+            self._saved_folder = node.path
+            self._settings().setValue("browse/folder", node.path)
+
+    def _on_folder_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        node = self.folder_model.node(current)
+        if node is not None:
+            self._remember_folder(node)
+        self._reset_scroll = True
+        self._schedule_refresh()
+
+    def _on_subfolders_toggled(self, on: bool) -> None:
+        self._settings().setValue("browse/subfolders", on)
+        self._schedule_refresh()
+
+    def _mark_folders_dirty(self, *_args) -> None:
+        self._folders_dirty = True
+
+    def show_in_folders(self, path: str) -> None:
+        """Pasa al modo Carpetas con la carpeta de ese sample abierta y el sample elegido."""
+        self.set_browse_mode("folders")
+        if self._folders_dirty:
+            self._rebuild_folders()
+        self._select_folder(os.path.dirname(path))
+        self.refresh()
+        self.search_timer.stop()
+        self.go_to(path)
+
+    def _folder_menu(self, pos) -> None:
+        node = self.folder_model.node(self.folder_tree.indexAt(pos))
+        if node is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Abrir en el Explorador",
+                       lambda: subprocess.Popen(["explorer", os.path.normpath(node.path)]))
+        menu.addAction("Copiar ruta", lambda: QGuiApplication.clipboard().setText(node.path))
+        if node.total:
+            collections_menu = menu.addMenu(f"Agregar todo a una colección ({node.total})")
+            for c in db.list_collections(self.conn):
+                collections_menu.addAction(
+                    c["name"], lambda c=c: self.add_folder_to_collection(node, c["id"]))
+            if not collections_menu.isEmpty():
+                collections_menu.addSeparator()
+            collections_menu.addAction(
+                "Nueva colección…", lambda: self.add_folder_to_collection(node, None))
+        if node.parent is None:
+            menu.addSeparator()
+            remove = menu.addAction("Quitar de la librería",
+                                    lambda: self.remove_folder(node.root))
+            remove.setEnabled(self.thread is None)
+        menu.exec(self.folder_tree.viewport().mapToGlobal(pos))
+
+    def add_folder_to_collection(self, node: folders.FolderNode, collection: int | None) -> None:
+        """Agrega a la colección (o a una nueva, con None) todos los samples de la carpeta y
+        sus subcarpetas, sin mirar los filtros."""
+        paths = db.folder_paths(self.conn, node.root, node.folder)
+        if collection is None:
+            if self.new_collection(paths) is None:
+                return
+        else:
+            db.add_to_collection(self.conn, collection, paths)
+            self._refresh_sidebar()
+        self.statusBar().showMessage(
+            f"{len(paths)} sample(s) de «{node.name}» agregados a la colección.", 4000)
 
     # --- Datos del usuario: favoritos, estrellas, colecciones, edición ---
     def selected_paths(self) -> list[str]:
@@ -1363,12 +1661,17 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Elegí una carpeta de samples")
         if folder:
             db.add_root(self.conn, folder.replace("/", "\\"))
+            self._folders_dirty = True
             self.start_scan()
 
-    def remove_folder(self) -> None:
-        item = self.roots.currentItem()
-        if item and not self.thread:
-            db.remove_root(self.conn, item.text())
+    def remove_folder(self, path: str | None = None) -> None:
+        """Quita una raíz de la librería (la elegida en la lista si no se pasa)."""
+        if path is None:
+            item = self.roots.currentItem()
+            path = item.text() if item else None
+        if path and not self.thread:
+            db.remove_root(self.conn, path)
+            self._folders_dirty = True
             self.refresh()
 
     def start_scan(self) -> None:
@@ -1383,6 +1686,7 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.statusBar().showMessage)
+        self.worker.indexed.connect(self._mark_folders_dirty)
         self.worker.indexed.connect(self.refresh)
         self.worker.finished.connect(self._scan_finished)
         self.thread.start()
@@ -1392,6 +1696,7 @@ class MainWindow(QMainWindow):
         self.thread.quit()
         self.thread.wait()
         self.thread = self.worker = None
+        self._folders_dirty = True
         self.statusBar().clearMessage()
         self.refresh()
         if self._rescan_for_ai:
@@ -1581,6 +1886,7 @@ class MainWindow(QMainWindow):
                                          "rato.", 5000)
             return
         name = os.path.basename(path)
+        self.set_browse_mode("library")  # la vista "Parecidos a…" es de toda la librería
         self.similar = {"path": path, "name": name, "scores": index.similar(path, len(index))}
         # La búsqueda por texto se limpia para que no esconda resultados; los demás filtros
         # siguen valiendo.
@@ -1736,6 +2042,7 @@ class MainWindow(QMainWindow):
             for copy in copies:
                 copies_menu.addAction(copy, lambda copy=copy: self.go_to(copy))
         menu.addSeparator()
+        menu.addAction("Ir a su carpeta", lambda: self.show_in_folders(path))
         menu.addAction("Mostrar en el Explorador",
                        lambda: subprocess.Popen(["explorer", "/select,", path]))
         menu.addAction("Copiar ruta", lambda: QGuiApplication.clipboard().setText(path))
@@ -1868,6 +2175,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_columns()
+        self._settings().setValue("browse/expanded", json.dumps(sorted(self._expanded)))
         self._download_cancel = True  # una descarga del modelo a medias se corta y se borra
         for thread, _worker in list(self.tasks):
             thread.wait(5000)
