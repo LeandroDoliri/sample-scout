@@ -9,6 +9,7 @@ Ableton o a cualquier DAW.
 
 - [Instalación](#instalación)
 - [Uso](#uso)
+- [Funciones de IA](#funciones-de-ia)
 - [Cómo ordena la librería](#cómo-ordena-la-librería)
 - [Actualizaciones](#actualizaciones)
 - [Tus datos](#tus-datos)
@@ -43,7 +44,8 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
      duración y no aparece mientras el filtro esté puesto.
    - **Key:** una tonalidad exacta.
    - **Buscar** (arriba): palabras sueltas sobre el nombre y las carpetas, por ejemplo
-     `techno vol 2 bass`.
+     `techno vol 2 bass`. Con las [funciones de IA](#funciones-de-ia) activadas, el selector
+     de al lado pasa a **Por sonido** para buscar por descripción.
 3. **Escuchá:** al seleccionar una fila se reproduce si está tildado "Escuchar al seleccionar".
    Con las flechas recorrés la lista escuchando, y `Espacio` reproduce o detiene.
 4. **Arrastrá** una o varias filas (`Ctrl`/`Shift` para elegir varias) a Ableton, al Explorador
@@ -79,6 +81,7 @@ Requiere Windows 10 u 11 de 64 bits (x64 o ARM64; en ARM64 corre emulado).
    La huella se calcula en el análisis y solo se recalcula si el archivo cambia (fecha o
    tamaño). Al actualizar desde una versión anterior, la app calcula ondas y huellas de toda la
    librería una vez, en segundo plano.
+10. **Sonidos parecidos y búsqueda por sonido:** ver [Funciones de IA](#funciones-de-ia).
 
 ### Organizar a mano
 
@@ -113,6 +116,47 @@ fuente de cada dato (`user`, `meta`, `name` o `audio`, explicadas abajo) y los t
 quita lo borrado. También pasa solo cada vez que abrís la app. **Quitar carpeta** (elegila
 primero en la lista "Carpetas") la saca de la librería sin tocar los archivos. Mientras haya un
 análisis en curso no hace nada: esperá a que termine.
+
+## Funciones de IA
+
+Opcionales y **locales**: la app escucha tus samples con un modelo de IA que corre en tu PC
+(CLAP de LAION, licencia Apache-2.0). No se manda nada a ningún servidor.
+
+**Activarlas:** botón **IA** (barra superior) → *Activar funciones de IA…*. La app baja el
+modelo una sola vez (**unos 195 MB**, con barra de avance, se puede cancelar y reintenta sola
+si se corta), verifica el sha256 de todo y lo guarda en
+`%LOCALAPPDATA%\SampleScout\models\clap-general-v1\`. Sin el modelo, o sin conexión al
+activarlas, la app anda igual que siempre y estas funciones quedan apagadas.
+
+Después, en segundo plano y después del análisis, la app **escucha** cada sample (los
+primeros 10 segundos) y guarda una "huella de sonido" en la base. Lleva unos 0,15 s por sample
+(unos 25 minutos cada 10.000) y la barra de abajo muestra el avance (`IA: escuchando samples
+…`). Solo se hace una vez: se repite para un archivo si cambia. Mientras tanto, lo que ya se
+escuchó se puede usar.
+
+- **Sonidos parecidos:** clic derecho sobre un sample → *≈ Sonidos parecidos* (o `Ctrl+P`, o el
+  enlace del panel de la derecha). Aparece la vista **≈ Parecidos a …** en el panel
+  *Biblioteca* con los 100 más parecidos, del más al menos parecido. Los filtros (tipo, BPM,
+  instrumento, búsqueda por nombre…) siguen funcionando sobre esa vista: por ejemplo, los
+  one-shots más parecidos a un loop. El tooltip y el panel de detalle muestran el porcentaje
+  de parecido.
+- **Búsqueda por sonido:** elegí **Por sonido (IA)** al lado del buscador y describí lo que
+  buscás: `kick oscuro con punch`, `redoblante crujiente`, `acordes de piano jazzeros`. La
+  lista muestra los 100 que mejor coinciden, y los demás filtros también valen. El modelo
+  entiende inglés: la app traduce sola los términos de producción más comunes
+  (redoblante → snare, bajo → bass, cálido → warm, subida → riser…), y los anglicismos
+  (kick, hi-hat, pad, lead) andan directo. Si algo no da lo que esperás, probá en inglés. La
+  primera búsqueda tarda un par de segundos más (carga el modelo de texto).
+
+**Desactivarlas:** botón **IA** → destildá *Funciones de IA activadas*. Deja de escuchar
+samples y se ocultan las opciones; el modelo queda en el disco para volver a activarlas.
+**Borrar el modelo:** botón **IA** → *Borrar el modelo…* borra la carpeta del modelo y las
+huellas de sonido guardadas (tus samples y tus datos no se tocan). Se puede volver a activar
+cuando quieras.
+
+Recursos: escuchando, el proceso de fondo usa ~1 GB de RAM y todos los núcleos menos dos (la
+ventana sigue fluida), y lo libera al terminar. Cada huella ocupa 1 KB en la base (10 MB cada
+10.000 samples).
 
 ## Cómo ordena la librería
 
@@ -171,9 +215,14 @@ Nunca se actualiza sin preguntar. Sin internet, no muestra nada.
   historial y correcciones, que viven en la misma base. Las bases de versiones anteriores se
   actualizan solas al abrir la app, sin perder nada.
 - Con la app abierta sin consola, los errores se guardan en `%APPDATA%\SampleScout\app.log`.
-- La disposición de las columnas está en `%APPDATA%\SampleScout\settings.ini`. Borrarlo
-  equivale a *Restablecer columnas*.
-- La única conexión a internet es la consulta de versiones a la API pública de GitHub.
+- La disposición de las columnas y si las funciones de IA están activadas están en
+  `%APPDATA%\SampleScout\settings.ini`. Borrarlo equivale a *Restablecer columnas*.
+- El modelo de IA, si lo activaste, está en `%LOCALAPPDATA%\SampleScout\models\` (unos
+  250 MB descomprimido). Se puede borrar desde la app o a mano con la app cerrada. Las
+  actualizaciones de la app no lo tocan.
+- Las únicas conexiones a internet son la consulta de versiones a la API pública de GitHub y,
+  solo si activás las funciones de IA, la descarga del modelo desde los releases de este
+  repositorio.
 
 ## Solución de problemas
 
@@ -183,6 +232,8 @@ Nunca se actualiza sin preguntar. Sin internet, no muestra nada.
 | La app no abre | Mirá `%APPDATA%\SampleScout\app.log`. |
 | El análisis tarda | La primera vez analiza todo, y con miles de samples puede llevar un rato (en ARM64 más, por la emulación). Se puede usar la app mientras tanto, y si la cerrás sigue donde quedó. |
 | Muchos samples en "Sin clasificar" | Es material sin nombre útil (loops propios, grabaciones). Buscalos por carpeta o por tipo. Mejora con el clasificador con IA. |
+| No se puede activar la IA | Hace falta internet una vez para bajar el modelo. Si la descarga llega dañada, la app no lo instala: tocá *Reintentar*. |
+| "Sonidos parecidos" dice que todavía no escuchó el sample | Está calculando las huellas de sonido (barra de abajo). Esperá a que llegue a ese sample. |
 | Un BPM o una key están mal | Mirá la fuente en el tooltip. Si es `name`, el nombre del archivo lo dice así. Si es `audio`, es una estimación. |
 | No suena | Revisá el dispositivo de salida predeterminado de Windows. La app usa ese. |
 
@@ -223,19 +274,25 @@ src/sample_scout/
   __main__.py     python -m sample_scout
   app.py          ventana PySide6: filtros, tabla, preescucha, arrastre y aviso de actualización
   db.py           esquema SQLite, migraciones, consultas y datos del usuario (por ruta)
-  scanner.py      escaneo incremental de carpetas y análisis en paralelo (ProcessPoolExecutor)
+  scanner.py      escaneo incremental de carpetas, análisis en paralelo (ProcessPoolExecutor)
+                  y embeddings de CLAP (un solo proceso aparte)
+  clap.py         funciones de IA: descarga del modelo, mel, encoders ONNX, traducción y búsqueda
   parser.py       datos desde el nombre del archivo y las carpetas
   metadata.py     chunk acid de los WAV
   analyzer.py     análisis de audio con librosa
   updater.py      actualización desde los releases de GitHub
-tests/            tests de parser.py, analyzer.py, datos del usuario, duplicados y onda
+tests/            tests de parser.py, analyzer.py, datos del usuario, duplicados, onda, CLAP
+                  (fixtures/clap_reference.npz: referencia de transformers) y updater
 tools/
   build_installer.ps1   arma el Python embebido, el instalador y el zip de actualización
   install_local.ps1     instala sin el Setup (PCs con Control inteligente de aplicaciones)
   release.ps1           publica la versión de VERSION en GitHub
   make_icon.py          genera icon.ico e icon.png (editá el script, no las imágenes)
   make_test_samples.py  librería sintética de resultado conocido para probar el análisis
-  fake_release.py       imita la API de GitHub para probar la actualización sin publicar
+  fake_release.py       imita la API de GitHub para probar la actualización sin publicar;
+                        con --model sirve el zip del modelo de IA
+  build_clap_model.py   arma dist\clap-general-v1.zip (modelo, prompts, licencia, manifest)
+  make_clap_fixture.py  genera el fixture de referencia de los tests de CLAP (con transformers)
 installer/SampleScout.iss   script de Inno Setup
 VERSION, RUNTIME, requirements.txt, CHANGELOG.md
 ```
@@ -255,6 +312,13 @@ VERSION, RUNTIME, requirements.txt, CHANGELOG.md
   instalada con `SAMPLE_SCOUT_UPDATE_URL=http://127.0.0.1:8799` (los pasos están en el
   docstring del script). Con `fake_release.py 0.1.2 2` se prueba el caso que pide el
   instalador completo.
+- **Funciones de IA:** los tests de `test_clap.py` y `test_embeddings.py` que usan el modelo
+  se saltean si no está instalado; con `SAMPLE_SCOUT_TEST_MODEL=<carpeta del modelo>` corren
+  contra esa carpeta (comparan con la referencia de transformers: coseno ≥ 0,999 en audio).
+  Para probar la descarga sin publicar nada:
+  `.venv/Scripts/python tools/fake_release.py --model` y abrí la app con
+  `SAMPLE_SCOUT_MODEL_URL=http://127.0.0.1:8799/clap-general-v1.zip` (y
+  `SAMPLE_SCOUT_MODELS=C:\temp\ss-models` para no tocar el modelo real).
 - **Interfaz sin ventana:** con `QT_QPA_PLATFORM=offscreen` se puede crear `MainWindow` desde
   un script y revisar `window.model.rows`, los filtros y `model.mimeData(...)`.
 
@@ -296,11 +360,31 @@ Versionado [semántico](https://semver.org/lang/es/): `MAJOR.MINOR.PATCH`.
 
 Las instalaciones existentes ven la versión nueva la próxima vez que abren la app.
 
+### Publicar el modelo de IA
+
+El modelo va en un release aparte, con tag `models-clap-general-v1`, **marcado como
+prerelease**: la app busca actualizaciones en `/releases/latest`, y un release de modelos no
+puede quedar como "Latest" (igual, `updater.py` ignora los prerelease y los tags que no son
+`vX.Y.Z`).
+
+1. Armá el zip (necesita la exportación a ONNX del spike de CLAP y el texto de la licencia
+   Apache-2.0); imprime el sha256:
+   ```powershell
+   .venv\Scripts\python tools\build_clap_model.py C:\temp\ss-clap\onnx\general apache-2.0.txt
+   ```
+2. Ese sha256 tiene que ser el de `clap.MODEL_SHA256` (el zip es reproducible: con las mismas
+   entradas da el mismo).
+3. Publicá:
+   ```powershell
+   gh release create models-clap-general-v1 dist\clap-general-v1.zip --prerelease --latest=false `
+     --title "Modelo de IA: CLAP general v1" --notes "Modelo para las funciones de IA (no es una versión de la app)."
+   ```
+Un modelo nuevo es otro id (`clap-general-v2`), otra carpeta y otro tag: el viejo sigue
+andando hasta que se actualice la app.
+
 ## Próximos pasos
 
-1. **Clasificación con IA** (PANNs o CLAP) para instrumentos de loops y material propio, en
-   reemplazo de la heurística.
-2. **"Sonidos parecidos"** con embeddings y búsqueda de vecinos más cercanos.
-3. **Búsqueda por texto libre** con CLAP ("kick oscuro con punch").
-4. Preescucha sincronizada al tempo del proyecto y filtro por tonalidad relativa.
-5. Firma digital del instalador, para que el Control inteligente de aplicaciones no lo bloquee.
+1. **Clasificación del instrumento con IA** (CLAP, ya instalado para las funciones de IA)
+   para loops y material propio, en reemplazo de la heurística.
+2. Preescucha sincronizada al tempo del proyecto y filtro por tonalidad relativa.
+3. Firma digital del instalador, para que el Control inteligente de aplicaciones no lo bloquee.

@@ -14,6 +14,11 @@ Y en otra terminal, la app instalada apuntando a este servidor:
 La app muestra el aviso de versión nueva; al tocar Actualizar debería reiniciarse con esa
 versión. Con min_runtime mayor que el RUNTIME instalado (p. ej. 2), en cambio, debe pedir el
 instalador completo sin tocar nada. Desde el repo (checkout git) solo muestra el aviso.
+
+Modelo de IA (sin publicar el release `models-…`): sirve dist/clap-general-v1.zip (o el zip que
+le pases), con soporte de Range como GitHub, para probar "Activar funciones de IA":
+    .venv/Scripts/python tools/fake_release.py --model [zip]
+    $env:SAMPLE_SCOUT_MODEL_URL = 'http://127.0.0.1:8799/clap-general-v1.zip'
 """
 
 import hashlib
@@ -46,9 +51,47 @@ def build_package(version: str, min_runtime: int) -> bytes:
     return buffer.getvalue()
 
 
+def serve_model(package: Path) -> None:
+    """Entrega el zip del modelo; acepta `Range: bytes=N-` (la app sigue una descarga cortada)."""
+    size = package.stat().st_size
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if not self.path.endswith(package.name):
+                self.send_response(404)
+                self.end_headers()
+                return
+            start = 0
+            if self.headers.get("Range", "").startswith("bytes="):
+                start = int(self.headers["Range"][6:].split("-")[0] or 0)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(size - start))
+            self.end_headers()
+            with open(package, "rb") as f:
+                f.seek(start)
+                try:
+                    while chunk := f.read(1 << 20):
+                        self.wfile.write(chunk)
+                except ConnectionError:  # la app canceló
+                    pass
+
+        def log_message(self, fmt, *args):
+            print(f"  {self.path} {self.headers.get('Range') or ''}")
+
+    print(f"Modelo {package.name} ({size:,} bytes) en http://127.0.0.1:{PORT}/{package.name}")
+    http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "--model":
+        serve_model(Path(sys.argv[2]) if len(sys.argv) > 2
+                    else ROOT / "dist" / "clap-general-v1.zip")
+        return
     version = sys.argv[1]
     min_runtime = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     package = build_package(version, min_runtime)

@@ -271,3 +271,40 @@ def analyze_pending(conn: sqlite3.Connection, progress: Progress | None = None,
                     progress(f"Analizando audio: {done}/{len(pending)}")
     conn.commit()
     return done
+
+
+def embed_pending(conn: sqlite3.Connection, model_dir: str, model: str,
+                  progress: Progress | None = None,
+                  should_stop: Callable[[], bool] = lambda: False,
+                  threads: int | None = None) -> int:
+    """Calcula los embeddings de CLAP que falten (ver db.embedding_pending), en lotes de
+    clap.BATCH, en **un solo** proceso aparte: cada proceso cargaría ~1 GB de modelo. Ese
+    proceso usa núcleos − 2 hilos y se cierra al terminar, así que el modelo de audio no queda
+    en memoria. Devuelve cuántos procesó."""
+    from sample_scout import clap
+
+    pending = db.embedding_pending(conn, model)
+    if not pending:
+        return 0
+    threads = threads or clap.default_threads()
+    batches = [pending[i:i + clap.BATCH] for i in range(0, len(pending), clap.BATCH)]
+    done = 0
+    with ProcessPoolExecutor(max_workers=1) as pool:
+        # Dos lotes en vuelo: mientras se guarda uno, el proceso ya decodifica el siguiente.
+        queue = [pool.submit(clap.embed_job, model_dir, threads, [s["path"] for s in b])
+                 for b in batches[:2]]
+        for i, batch in enumerate(batches):
+            if should_stop():
+                for f in queue:
+                    f.cancel()
+                break
+            vecs = queue.pop(0).result()
+            if i + 2 < len(batches):
+                queue.append(pool.submit(clap.embed_job, model_dir, threads,
+                                         [s["path"] for s in batches[i + 2]]))
+            db.save_embeddings(conn, model, [(s["path"], s["mtime"], s["size"], v)
+                                             for s, v in zip(batch, vecs)])
+            done += len(batch)
+            if progress:
+                progress(f"IA: escuchando samples {done}/{len(pending)}")
+    return done
